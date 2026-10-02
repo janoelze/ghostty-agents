@@ -135,7 +135,7 @@ enum AgentMenu {
             } else if menuItem.action == #selector(toggleCatMode(_:)) {
                 menuItem.state = AgentMonitor.shared.catMode ? .on : .off
                 guard CatSprite.isAvailable else {
-                    menuItem.toolTip = "Put a cat sprite sheet at \(CatSprite.url.path)"
+                    menuItem.toolTip = "Put cat sprite sheets (cat-<color>.png) in \(CatSprite.directory.path)"
                     return false
                 }
                 menuItem.toolTip = nil

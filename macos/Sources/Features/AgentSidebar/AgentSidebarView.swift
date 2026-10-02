@@ -250,7 +250,7 @@ private struct AgentRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
             if catMode {
-                AgentCatView(state: agent.state, emphasized: agent.needsAttention, seed: agent.id.hashValue)
+                AgentCatView(state: agent.state, emphasized: agent.needsAttention, seed: Self.catSeed(agent.id))
                     .overlay(alignment: .bottomTrailing) {
                         if agent.state == .needsInput {
                             Circle().fill(Color.orange).frame(width: 6, height: 6)
@@ -312,6 +312,11 @@ private struct AgentRow: View {
                     .foregroundStyle(agent.needsAttention ? AnyShapeStyle(HierarchicalShapeStyle.secondary) : AnyShapeStyle(HierarchicalShapeStyle.tertiary))
             }
         }
+    }
+
+    /// Stable across launches (unlike `hashValue`), so an agent keeps its cat's coat.
+    private static func catSeed(_ id: UUID) -> Int {
+        Int(id.uuid.0) << 8 | Int(id.uuid.1)
     }
 
     private var detailStyle: AnyShapeStyle {

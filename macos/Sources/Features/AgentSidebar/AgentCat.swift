@@ -3,66 +3,119 @@ import SwiftUI
 
 /// Cat Mode: each agent in the sidebar is a little pixel cat whose animation shows its state.
 ///
-/// The sprite sheet isn't part of the repository (its license is unknown). It is loaded from
-/// `~/Library/Application Support/ghostty-agents/cat-sprite.png`: 8 columns × 10 rows of
-/// 32×32 frames, one animation per row.
+/// Sprite sheets aren't part of the repository (their license is unknown). They are loaded
+/// from `~/Library/Application Support/ghostty-agents/cat-<color>.png`, one per coat color,
+/// each a grid of 32×32 frames with one animation per row (the layout of the "cat 16x16
+/// animation" pixel art pack). Frame counts are read from the sheet itself.
 enum CatSprite {
-    static var url: URL {
+    static var directory: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("ghostty-agents/cat-sprite.png")
+            .appendingPathComponent("ghostty-agents", isDirectory: true)
     }
 
     struct Animation: Equatable {
         let row: Int
-        let frames: Int
         let fps: Double
     }
 
-    static let sit = Animation(row: 0, frames: 4, fps: 4)
-    static let look = Animation(row: 1, frames: 4, fps: 4)
-    static let groom = Animation(row: 2, frames: 4, fps: 6)
-    static let groomPaw = Animation(row: 3, frames: 4, fps: 6)
-    static let stretch = Animation(row: 4, frames: 8, fps: 8)
-    static let curl = Animation(row: 5, frames: 8, fps: 6)
-    static let sleep = Animation(row: 6, frames: 4, fps: 2)
-    static let paw = Animation(row: 7, frames: 6, fps: 8)
-    static let jump = Animation(row: 8, frames: 7, fps: 10)
-    static let run = Animation(row: 9, frames: 8, fps: 12)
+    static let sit = Animation(row: 0, fps: 5)
+    static let run = Animation(row: 6, fps: 12)
+    static let sleep = Animation(row: 16, fps: 1.5)
+    static let walk = Animation(row: 22, fps: 9)
+    static let walkAlt = Animation(row: 23, fps: 9)
+    static let meow = Animation(row: 32, fps: 7)
+    static let wash = Animation(row: 36, fps: 7)
+    static let groom = Animation(row: 39, fps: 7)
 
     private static let cell = 32
-    private static var sheet: CGImage?
-    private static var loaded = false
-    private static var frames: [Int: CGImage] = [:]
 
-    static var isAvailable: Bool {
-        loadIfNeeded()
-        return sheet != nil
+    private struct Sheet {
+        let image: CGImage
+        let pixels: [UInt8]
+        var frameCounts: [Int: Int] = [:]
     }
 
-    /// Re-reads the sheet, e.g. after the user put one in place.
+    private static var sheets: [String: Sheet] = [:]
+    private static var loaded = false
+    private static var frames: [String: CGImage] = [:]
+
+    /// Coat colors with a sheet on disk, e.g. ["gray", "orange", "white"].
+    static var colors: [String] {
+        loadIfNeeded()
+        return sheets.keys.sorted()
+    }
+
+    static var isAvailable: Bool { !colors.isEmpty }
+
+    /// Re-reads the sheets, e.g. after the user put new ones in place.
     static func reload() {
         loaded = false
+        sheets = [:]
         frames = [:]
         loadIfNeeded()
     }
 
-    static func frame(_ animation: Animation, index: Int) -> CGImage? {
+    static func frame(color: String, _ animation: Animation, index: Int) -> CGImage? {
         loadIfNeeded()
-        guard let sheet else { return nil }
-        let column = index % animation.frames
-        let key = animation.row * 100 + column
+        guard let count = frameCount(color: color, row: animation.row), count > 0 else { return nil }
+        let column = index % count
+        let key = "\(color)/\(animation.row)/\(column)"
         if let cached = frames[key] { return cached }
         let rect = CGRect(x: column * cell, y: animation.row * cell, width: cell, height: cell)
-        guard let image = sheet.cropping(to: rect) else { return nil }
+        guard let image = sheets[color]?.image.cropping(to: rect) else { return nil }
         frames[key] = image
         return image
+    }
+
+    /// The number of frames in a row: the filled cells counted from the left.
+    private static func frameCount(color: String, row: Int) -> Int? {
+        guard var sheet = sheets[color] else { return nil }
+        if let count = sheet.frameCounts[row] { return count }
+        let width = sheet.image.width
+        let columns = width / cell
+        guard (row + 1) * cell <= sheet.image.height else { return 0 }
+
+        func filled(_ column: Int) -> Bool {
+            for y in row * cell..<(row + 1) * cell {
+                for x in column * cell..<(column + 1) * cell where sheet.pixels[(y * width + x) * 4 + 3] > 25 {
+                    return true
+                }
+            }
+            return false
+        }
+
+        var count = 0
+        while count < columns && filled(count) { count += 1 }
+        sheet.frameCounts[row] = count
+        sheets[color] = sheet
+        return count
     }
 
     private static func loadIfNeeded() {
         guard !loaded else { return }
         loaded = true
-        guard let image = NSImage(contentsOf: url) else { sheet = nil; return }
-        sheet = image.cgImage(forProposedRect: nil, context: nil, hints: nil)
+        let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
+        for url in files where url.lastPathComponent.hasPrefix("cat-") && url.pathExtension == "png" {
+            guard let image = NSImage(contentsOf: url)?.cgImage(forProposedRect: nil, context: nil, hints: nil),
+                  let pixels = rgba(image) else { continue }
+            let color = String(url.deletingPathExtension().lastPathComponent.dropFirst("cat-".count))
+            sheets[color] = Sheet(image: image, pixels: pixels)
+        }
+    }
+
+    private static func rgba(_ image: CGImage) -> [UInt8]? {
+        var pixels = [UInt8](repeating: 0, count: image.width * image.height * 4)
+        let drawn = pixels.withUnsafeMutableBytes { buffer -> Bool in
+            guard let context = CGContext(
+                data: buffer.baseAddress, width: image.width, height: image.height,
+                bitsPerComponent: 8, bytesPerRow: image.width * 4,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            ) else { return false }
+            context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+            return true
+        }
+        return drawn ? pixels : nil
     }
 }
 
@@ -71,18 +124,20 @@ enum CatSprite {
 struct AgentCatView: View {
     let state: AgentState
     let emphasized: Bool
-    /// Desynchronizes cats, so several agents don't move in lockstep.
+    /// Picks the coat color and desynchronizes cats, so agents don't move in lockstep.
     let seed: Int
+
+    @Environment(\.colorScheme) private var colorScheme
 
     private static let segmentLength: TimeInterval = 3.2
 
-    /// The part of each 32×32 cell the cat occupies in its resting poses (measured on the
-    /// sheet). Only this area sizes the view; jumps rise above it without being clipped.
-    static let content = CGRect(x: 7, y: 18, width: 18, height: 14)
+    /// The part of each 32×32 cell the cats occupy (measured on the sheet). Only this area
+    /// sizes the view.
+    static let content = CGRect(x: 3, y: 5, width: 26, height: 20)
 
-    /// Points per sprite pixel. 2 keeps pixels whole on Retina displays (4 device pixels)
-    /// and makes a sitting cat about as tall as the row's two lines of text.
-    static let scale: CGFloat = 2
+    /// Points per sprite pixel. Whole numbers keep pixels crisp; at 1 a sitting cat is about
+    /// 18 points tall, a bit shorter than the row's two lines of text.
+    static let scale: CGFloat = 1
 
     static var size: CGSize {
         CGSize(width: content.width * scale, height: content.height * scale)
@@ -92,7 +147,7 @@ struct AgentCatView: View {
         TimelineView(.periodic(from: .now, by: 1.0 / 12)) { context in
             let (animation, index) = pick(at: context.date.timeIntervalSinceReferenceDate)
             ZStack(alignment: .topLeading) {
-                if let image = CatSprite.frame(animation, index: index) {
+                if let image = CatSprite.frame(color: color, animation, index: index) {
                     Image(decorative: image, scale: 1)
                         .interpolation(.none)
                         .resizable()
@@ -105,13 +160,24 @@ struct AgentCatView: View {
         .accessibilityHidden(true)
     }
 
+    /// A coat that stands out against the theme: light cats on dark backgrounds and the
+    /// other way round.
+    private var color: String {
+        let available = CatSprite.colors
+        let preferred = colorScheme == .dark ? ["white", "orange"] : ["gray", "orange"]
+        let palette = preferred.filter(available.contains)
+        let choices = palette.isEmpty ? available : palette
+        guard !choices.isEmpty else { return "" }
+        return choices[abs(seed) % choices.count]
+    }
+
     private var sequence: [CatSprite.Animation] {
         switch state {
-        case .working: return [CatSprite.run, CatSprite.run, CatSprite.paw]
-        case .needsInput: return [CatSprite.jump, CatSprite.look]
-        case .done where emphasized: return [CatSprite.sit, CatSprite.groom, CatSprite.look, CatSprite.groomPaw]
+        case .working: return [CatSprite.walk, CatSprite.walkAlt, CatSprite.walk, CatSprite.run]
+        case .needsInput: return [CatSprite.meow, CatSprite.sit]
+        case .done where emphasized: return [CatSprite.sit, CatSprite.groom, CatSprite.sit, CatSprite.wash]
         case .done: return [CatSprite.sleep]
-        case .running: return [CatSprite.sit, CatSprite.look]
+        case .running: return [CatSprite.sit]
         }
     }
 
