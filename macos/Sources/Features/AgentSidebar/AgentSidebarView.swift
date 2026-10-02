@@ -223,7 +223,9 @@ private struct AgentRow: View {
                 .fill(Color.primary.opacity(agent.isFocused ? 0.12 : hovering ? 0.06 : 0)))
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
-        .help([agent.name, agent.directory].compactMap { $0 }.joined(separator: " · "))
+        .help(
+            [agent.name, agent.directory, agent.sessionID.map { "session \($0.prefix(8))" } ?? "no hook status"]
+                .compactMap { $0 }.joined(separator: " · "))
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(agent.name): \(agent.title), \(agent.state.label), \(agent.detail)")
         .accessibilityAddTraits(.isButton)

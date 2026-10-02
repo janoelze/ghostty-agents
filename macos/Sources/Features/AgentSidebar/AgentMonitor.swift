@@ -96,6 +96,9 @@ final class AgentMonitor: ObservableObject {
     private var lastFocusedID: UUID?
     private var surfaces: [UUID: Weak<Ghostty.SurfaceView>] = [:]
     private var gitRoots: [String: String?] = [:]
+    /// Session titles from the search index, refreshed while a session runs since its AI
+    /// title can change.
+    private var sessionTitles: [String: (title: String?, fetched: Date)] = [:]
     private var lastViewed: [UUID: Date] = [:]
 
     private init() {
@@ -254,7 +257,11 @@ final class AgentMonitor: ObservableObject {
             id: surface.id,
             name: name,
             sessionID: status?.sessionID,
-            title: Self.title(surface.title, prompt: status?.lastPrompt, name: name),
+            title: Self.title(
+                surface.title,
+                sessionTitle: status?.sessionID.flatMap(sessionTitle),
+                prompt: status?.lastPrompt,
+                name: name),
             directory: cwd.map { ($0 as NSString).abbreviatingWithTildeInPath },
             project: project(for: cwd),
             state: state,
@@ -320,13 +327,30 @@ final class AgentMonitor: ObservableObject {
         return String(trimmed.prefix(7))
     }
 
-    /// Agents decorate titles with spinners and status glyphs; strip those and fall back to
-    /// the last prompt when the title says nothing useful. The directory is never used here;
-    /// it is already in the group header.
-    private static func title(_ raw: String, prompt: String?, name: String) -> String {
+    /// The indexed title of a session, fetched in the background on first use and refreshed
+    /// every minute. Returns what is cached so far.
+    private func sessionTitle(_ id: String) -> String? {
+        let cached = sessionTitles[id]
+        if cached == nil || Date().timeIntervalSince(cached!.fetched) > 60 {
+            sessionTitles[id] = (cached?.title, Date())
+            SessionIndex.shared.title(forSession: id) { [weak self] title in
+                guard let self, title != cached?.title else { return }
+                self.sessionTitles[id] = (title, Date())
+                self.refresh()
+            }
+        }
+        return cached?.title
+    }
+
+    /// Agents decorate titles with spinners and status glyphs; strip those. When the
+    /// terminal title says nothing useful, use the session's title (known for resumed
+    /// sessions), then the last prompt. The directory is never used here; it is already in
+    /// the group header.
+    private static func title(_ raw: String, sessionTitle: String?, prompt: String?, name: String) -> String {
         let trimmed = String(raw.drop { !$0.isLetter && !$0.isNumber }).trimmingCharacters(in: .whitespaces)
         let generic: Set<String> = [name.lowercased(), "claude", "claude code", "ghostty", ""]
         if !generic.contains(trimmed.lowercased()) { return trimmed }
+        if let sessionTitle, !sessionTitle.isEmpty { return sessionTitle }
         if let prompt, !prompt.isEmpty { return prompt }
         return name
     }

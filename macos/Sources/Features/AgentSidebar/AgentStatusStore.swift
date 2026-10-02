@@ -48,10 +48,16 @@ enum AgentStatusStore {
             options: [.skipsHiddenFiles]
         ) else { return nil }
 
-        let events: [Event] = files
+        var events: [Event] = files
             .filter { $0.pathExtension == "json" }
             .compactMap { Event(url: $0) }
             .sorted { $0.date < $1.date }
+
+        // A terminal can run several sessions one after another (/clear, quitting and
+        // resuming another). Only the newest session's events describe what runs now.
+        if let current = events.last?.payload["session_id"] as? String {
+            events = events.filter { ($0.payload["session_id"] as? String ?? current) == current }
+        }
         guard let latest = events.last(where: { $0.state != nil }) else { return nil }
 
         let promptEvent = events.last { $0.name == "UserPromptSubmit" }

@@ -451,6 +451,25 @@ final class SessionIndex: @unchecked Sendable {
         return parts.joined(separator: " ")
     }
 
+    // MARK: Session titles (search queue)
+
+    /// The title of a session (its AI title, or its first prompt), for agents that were
+    /// resumed and have no prompt in this run yet. Calls back on the main queue.
+    func title(forSession id: String, completion: @escaping (String?) -> Void) {
+        searchQueue.async { [self] in
+            var title: String?
+            if reader == nil, FileManager.default.fileExists(atPath: Self.databaseURL.path) {
+                reader = try? SQLiteConnection(path: Self.databaseURL.path)
+            }
+            try? reader?.query("""
+                SELECT coalesce(title, first_prompt) FROM sessions
+                WHERE id = ? ORDER BY updated DESC LIMIT 1
+                """, [id]) { title = $0.string(0) }
+            let result = title.map(Self.oneLine).flatMap { $0.isEmpty ? nil : $0 }
+            DispatchQueue.main.async { completion(result) }
+        }
+    }
+
     // MARK: Searching (search queue)
 
     /// Searches on a background queue and calls `completion` on the main queue.
