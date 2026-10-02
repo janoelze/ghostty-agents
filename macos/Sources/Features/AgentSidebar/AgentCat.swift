@@ -21,8 +21,7 @@ enum CatSprite {
     static let sit = Animation(row: 0, fps: 5)
     static let run = Animation(row: 6, fps: 12)
     static let sleep = Animation(row: 16, fps: 1.5)
-    static let walk = Animation(row: 22, fps: 9)
-    static let walkAlt = Animation(row: 23, fps: 9)
+    static let walkRight = Animation(row: 23, fps: 9)
     static let meow = Animation(row: 32, fps: 7)
     static let wash = Animation(row: 36, fps: 7)
     static let groom = Animation(row: 39, fps: 7)
@@ -33,6 +32,7 @@ enum CatSprite {
         let image: CGImage
         let pixels: [UInt8]
         var frameCounts: [Int: Int] = [:]
+        var bounds: [Int: CGRect] = [:]
     }
 
     private static var sheets: [String: Sheet] = [:]
@@ -65,6 +65,35 @@ enum CatSprite {
         guard let image = sheets[color]?.image.cropping(to: rect) else { return nil }
         frames[key] = image
         return image
+    }
+
+    /// Where an animation's cat is within its cells: the union of the visible pixels of all
+    /// its frames, in sprite pixels. Used to center animations consistently, since each row
+    /// places the cat a little differently.
+    static func bounds(color: String, _ animation: Animation) -> CGRect? {
+        loadIfNeeded()
+        guard let count = frameCount(color: color, row: animation.row), count > 0,
+              var sheet = sheets[color] else { return nil }
+        if let cached = sheet.bounds[animation.row] { return cached }
+
+        let width = sheet.image.width
+        var minX = cell, minY = cell, maxX = -1, maxY = -1
+        for column in 0..<count {
+            for y in 0..<cell {
+                for x in 0..<cell {
+                    let px = column * cell + x, py = animation.row * cell + y
+                    guard sheet.pixels[(py * width + px) * 4 + 3] > 25 else { continue }
+                    minX = min(minX, x); maxX = max(maxX, x)
+                    minY = min(minY, y); maxY = max(maxY, y)
+                }
+            }
+        }
+        let rect = maxX < 0
+            ? CGRect(x: 0, y: 0, width: cell, height: cell)
+            : CGRect(x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1)
+        sheet.bounds[animation.row] = rect
+        sheets[color] = sheet
+        return rect
     }
 
     /// The number of frames in a row: the filled cells counted from the left.
@@ -147,12 +176,17 @@ struct AgentCatView: View {
         TimelineView(.periodic(from: .now, by: 1.0 / 12)) { context in
             let (animation, index) = pick(at: context.date.timeIntervalSinceReferenceDate)
             ZStack(alignment: .topLeading) {
-                if let image = CatSprite.frame(color: color, animation, index: index) {
+                if let image = CatSprite.frame(color: color, animation, index: index),
+                   let bounds = CatSprite.bounds(color: color, animation) {
+                    // Center each animation horizontally and stand it on the bottom edge,
+                    // so switching animations doesn't make the cat jump around.
                     Image(decorative: image, scale: 1)
                         .interpolation(.none)
                         .resizable()
                         .frame(width: 32 * Self.scale, height: 32 * Self.scale)
-                        .offset(x: -Self.content.minX * Self.scale, y: -Self.content.minY * Self.scale)
+                        .offset(
+                            x: (Self.size.width / 2 - bounds.midX * Self.scale).rounded(),
+                            y: Self.size.height - bounds.maxY * Self.scale)
                 }
             }
             .frame(width: Self.size.width, height: Self.size.height, alignment: .topLeading)
@@ -173,7 +207,8 @@ struct AgentCatView: View {
 
     private var sequence: [CatSprite.Animation] {
         switch state {
-        case .working: return [CatSprite.walk, CatSprite.walkAlt, CatSprite.walk, CatSprite.run]
+        // Rightward only: row 22 walks left, so mixing it in makes the cat turn around.
+        case .working: return [CatSprite.walkRight, CatSprite.walkRight, CatSprite.run]
         case .needsInput: return [CatSprite.meow, CatSprite.sit]
         case .done where emphasized: return [CatSprite.sit, CatSprite.groom, CatSprite.sit, CatSprite.wash]
         case .done: return [CatSprite.sleep]

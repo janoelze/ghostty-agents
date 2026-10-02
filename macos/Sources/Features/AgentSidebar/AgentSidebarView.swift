@@ -257,7 +257,8 @@ private struct AgentRow: View {
                                 .offset(x: 2, y: 1)
                         }
                     }
-                    .padding(.top, 2)
+                    // Centered against the title and detail lines (12 + 2 + 11 pt text).
+                    .frame(height: 30)
             } else {
                 AgentStatusDot(state: agent.state, emphasized: agent.needsAttention)
                     .padding(.top, 4)
