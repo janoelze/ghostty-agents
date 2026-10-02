@@ -186,6 +186,15 @@ final class AgentMonitor: ObservableObject {
         focus(id)
     }
 
+    /// Closes the agent's terminal (split or tab), which ends the agent. Ghostty asks for
+    /// confirmation since a process is running, and the close can be undone.
+    func close(_ id: UUID) {
+        guard let surface = surfaces[id]?.value,
+              let controller = TerminalController.all.first(where: { $0.surfaceTree.contains(surface) })
+        else { return }
+        controller.closeSurface(surface, withConfirmation: true)
+    }
+
     /// Focuses the agent at a 1-based position in the sidebar.
     func focus(position: Int) {
         guard position >= 1, position <= agents.count else { return }

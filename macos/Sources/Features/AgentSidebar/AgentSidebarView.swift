@@ -255,6 +255,8 @@ private struct AgentContextMenu: View {
             session: agent.session,
             transcriptPath: agent.transcriptPath,
             directory: agent.session?.cwd ?? agent.directory.map { ($0 as NSString).expandingTildeInPath })
+        Divider()
+        Button("Quit Agent") { AgentMonitor.shared.close(agent.id) }
     }
 }
 
