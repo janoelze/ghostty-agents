@@ -60,16 +60,22 @@ enum AgentStatusStore {
             updatedAt: latest.date)
     }
 
-    /// Removes status for surfaces that no longer exist.
+    /// Removes status for surfaces that no longer exist and haven't reported in a day.
+    /// `SessionEnd` normally cleans up; this catches agents that crashed. The age check keeps
+    /// two running builds (e.g. a dev build next to the installed one) from deleting each
+    /// other's status.
     static func prune(keeping alive: Set<UUID>) {
         guard let dirs = try? FileManager.default.contentsOfDirectory(
             at: directory,
-            includingPropertiesForKeys: nil,
+            includingPropertiesForKeys: [.contentModificationDateKey],
             options: [.skipsHiddenFiles]
         ) else { return }
 
+        let cutoff = Date().addingTimeInterval(-24 * 60 * 60)
         for dir in dirs {
             guard let id = UUID(uuidString: dir.lastPathComponent), !alive.contains(id) else { continue }
+            let modified = try? dir.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+            guard let modified, modified < cutoff else { continue }
             try? FileManager.default.removeItem(at: dir)
         }
     }

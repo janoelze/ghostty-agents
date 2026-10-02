@@ -126,7 +126,7 @@ final class AgentMonitor: ObservableObject {
         if found != agents { agents = found }
         AgentMenu.update(agents: agents)
 
-        // Status of closed surfaces is never read again.
+        // Clean up after agents that exited without a SessionEnd hook.
         if !alive.isEmpty { AgentStatusStore.prune(keeping: alive) }
     }
 

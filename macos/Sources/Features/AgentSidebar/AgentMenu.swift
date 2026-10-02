@@ -76,6 +76,7 @@ enum AgentMenu {
         }
     }
 
+    @MainActor
     private final class Target: NSObject, NSMenuItemValidation {
         @objc func toggleSidebar(_ sender: Any?) {
             AgentMonitor.shared.toggleSidebar()
