@@ -80,6 +80,19 @@ final class AgentMonitor: ObservableObject {
         didSet { UserDefaults.standard.set(isSidebarVisible, forKey: Self.visibleKey) }
     }
 
+    /// Project paths whose groups are collapsed in the sidebar. Remembered across launches.
+    @Published private(set) var collapsedProjects: Set<String> {
+        didSet { UserDefaults.standard.set(Array(collapsedProjects), forKey: Self.collapsedKey) }
+    }
+
+    func toggleCollapsed(_ project: Project) {
+        if collapsedProjects.contains(project.path) {
+            collapsedProjects.remove(project.path)
+        } else {
+            collapsedProjects.insert(project.path)
+        }
+    }
+
     @Published var sidebarWidth: CGFloat {
         didSet { UserDefaults.standard.set(Double(sidebarWidth), forKey: Self.widthKey) }
     }
@@ -88,6 +101,7 @@ final class AgentMonitor: ObservableObject {
     static let maxWidth: CGFloat = 480
     private static let visibleKey = "GhosttyAgentsSidebarVisible"
     private static let widthKey = "GhosttyAgentsSidebarWidth"
+    private static let collapsedKey = "GhosttyAgentsCollapsedProjects"
 
     private var timer: Timer?
     private var watcher: AgentChangeWatcher?
@@ -106,6 +120,7 @@ final class AgentMonitor: ObservableObject {
         isSidebarVisible = defaults.object(forKey: Self.visibleKey) as? Bool ?? true
         let width = defaults.double(forKey: Self.widthKey)
         sidebarWidth = width > 0 ? CGFloat(width) : 240
+        collapsedProjects = Set(defaults.stringArray(forKey: Self.collapsedKey) ?? [])
     }
 
     /// Starts polling. Safe to call repeatedly; called by each sidebar as it appears.

@@ -261,7 +261,41 @@ private enum Highlight {
     }
 }
 
-/// The line at the bottom of the sidebar: agent summary and search index status.
+/// The search index state, shown at the right end of the empty search field: a progress
+/// ring while transcripts are indexed, the number of searchable sessions once done.
+struct SearchIndexBadge: View {
+    let state: SessionIndexState
+
+    var body: some View {
+        Group {
+            if state.isIndexing && state.total > 0 {
+                let progress = Double(state.done) / Double(max(state.total, 1))
+                HStack(spacing: 4) {
+                    ZStack {
+                        Circle().stroke(Color.secondary.opacity(0.3), lineWidth: 1.5)
+                        Circle()
+                            .trim(from: 0, to: progress)
+                            .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
+                            .rotationEffect(.degrees(-90))
+                            .animation(.easeOut(duration: 0.2), value: progress)
+                    }
+                    .frame(width: 10, height: 10)
+                    Text("\(Int(progress * 100))%")
+                        .monospacedDigit()
+                }
+                .help("Indexing session transcripts: \(state.done) of \(state.total)")
+            } else if state.sessions > 0 {
+                Text("\(state.sessions)")
+                    .monospacedDigit()
+                    .help("\(state.sessions) sessions searchable. Agents → Rebuild Search Index to start over.")
+            }
+        }
+        .font(.system(size: 10.5))
+        .foregroundStyle(.tertiary)
+    }
+}
+
+/// The line at the bottom of the sidebar: a summary of the running agents.
 struct SidebarStatusLine: View {
     @ObservedObject var monitor: AgentMonitor
     @ObservedObject var search: SessionSearch
@@ -273,8 +307,6 @@ struct SidebarStatusLine: View {
                 .lineLimit(1)
 
             Spacer(minLength: 6)
-
-            indexStatus
         }
         .font(.system(size: 10.5))
         .foregroundStyle(.tertiary)
@@ -297,25 +329,5 @@ struct SidebarStatusLine: View {
         if working > 0 { parts.append("\(working) working") }
         if waiting > 0 { parts.append("\(waiting) waiting") }
         return parts.joined(separator: " · ")
-    }
-
-    @ViewBuilder
-    private var indexStatus: some View {
-        let state = search.indexState
-        if state.isIndexing && state.total > 0 {
-            HStack(spacing: 5) {
-                ProgressView(value: Double(state.done), total: Double(max(state.total, 1)))
-                    .progressViewStyle(.linear)
-                    .frame(width: 36)
-                    .controlSize(.mini)
-                Text("Indexing \(state.done)/\(state.total)")
-                    .monospacedDigit()
-            }
-            .help("Indexing session transcripts for search")
-        } else if state.sessions > 0 {
-            Text("\(state.sessions) sessions")
-                .monospacedDigit()
-                .help("Sessions in the search index. Right-click to rebuild.")
-        }
     }
 }

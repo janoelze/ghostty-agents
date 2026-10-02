@@ -59,6 +59,11 @@ struct AgentSidebarView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             SessionSearchField(search: search, colorScheme: style.colorScheme)
+                .overlay(alignment: .trailing) {
+                    SearchIndexBadge(state: search.indexState)
+                        .padding(.trailing, 8)
+                        .opacity(search.query.isEmpty ? 1 : 0)
+                }
                 .padding(.horizontal, 10)
                 .padding(.top, 8)
                 .padding(.bottom, 2)
@@ -90,8 +95,16 @@ struct AgentSidebarView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         ForEach(monitor.groups) { group in
-                            AgentGroupHeader(project: group.project, color: group.color)
-                            ForEach(group.agents, id: \.agent.id) { entry in
+                            let collapsed = monitor.collapsedProjects.contains(group.project.path)
+                            AgentGroupHeader(
+                                project: group.project,
+                                color: group.color,
+                                agents: group.agents.map(\.agent),
+                                isCollapsed: collapsed
+                            ) {
+                                withAnimation(.easeInOut(duration: 0.15)) { monitor.toggleCollapsed(group.project) }
+                            }
+                            ForEach(collapsed ? [] : group.agents, id: \.agent.id) { entry in
                                 AgentRow(agent: entry.agent, position: entry.position)
                                     .onTapGesture { monitor.focus(entry.agent.id) }
                                     .padding(.bottom, 2)
@@ -145,12 +158,25 @@ struct AgentSidebarView: View {
 }
 
 /// The project a group of agents works in: repository name and branch.
+/// A project folder: click to collapse or expand. A collapsed folder still shows how many
+/// agents it holds and whether any of them needs attention.
 private struct AgentGroupHeader: View {
     let project: AgentMonitor.Project
     let color: TerminalTabColor?
+    let agents: [AgentMonitor.Agent]
+    let isCollapsed: Bool
+    let onToggle: () -> Void
+
+    @State private var hovering = false
 
     var body: some View {
         HStack(spacing: 6) {
+            Image(systemName: "chevron.right")
+                .font(.system(size: 8, weight: .bold))
+                .foregroundStyle(.tertiary)
+                .rotationEffect(.degrees(isCollapsed ? 0 : 90))
+                .frame(width: 8)
+
             if let swatch = color?.displayColor {
                 RoundedRectangle(cornerRadius: 2, style: .continuous)
                     .fill(Color(nsColor: swatch))
@@ -165,7 +191,9 @@ private struct AgentGroupHeader: View {
 
             Spacer(minLength: 4)
 
-            if let branch = project.branch {
+            if isCollapsed {
+                collapsedSummary
+            } else if let branch = project.branch {
                 HStack(spacing: 3) {
                     Image(systemName: "arrow.triangle.branch")
                         .font(.system(size: 9))
@@ -178,9 +206,36 @@ private struct AgentGroupHeader: View {
             }
         }
         .padding(.horizontal, 8)
-        .padding(.top, 10)
-        .padding(.bottom, 3)
+        .padding(.vertical, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .fill(Color.primary.opacity(hovering ? 0.05 : 0)))
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onToggle)
+        .onHover { hovering = $0 }
+        .padding(.top, 6)
+        .padding(.bottom, 1)
         .help(project.path)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(project.name), \(agents.count) agents, \(isCollapsed ? "collapsed" : "expanded")")
+        .accessibilityAddTraits(.isButton)
+    }
+
+    /// Agent count, plus the most urgent status so a collapsed folder can't hide it.
+    private var collapsedSummary: some View {
+        HStack(spacing: 4) {
+            if agents.contains(where: { $0.state == .needsInput }) {
+                Circle().fill(Color.orange).frame(width: 6, height: 6)
+            } else if agents.contains(where: \.needsAttention) {
+                Circle().fill(Color.green).frame(width: 6, height: 6)
+            } else if agents.contains(where: { $0.state == .working }) {
+                Circle().fill(Color.accentColor).frame(width: 6, height: 6)
+            }
+            Text("\(agents.count)")
+                .monospacedDigit()
+        }
+        .font(.system(size: 10.5))
+        .foregroundStyle(.tertiary)
     }
 }
 
