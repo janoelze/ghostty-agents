@@ -1,0 +1,163 @@
+# Keeps this fork in sync with ghostty-org/ghostty.
+#
+# 1. merge:   merges upstream main into our main on a staging branch. On a merge
+#             conflict it opens (or updates) an issue listing the files and stops.
+# 2. build:   builds the merged tree on macOS, so a merge that is textually clean but
+#             breaks the Swift build never reaches main.
+# 3. promote: fast-forwards main to the staging branch, closes sync issues, and
+#             disables any upstream workflows (they target upstream's own runners).
+#
+# Requires a repository secret SYNC_TOKEN: a fine-grained personal access token for
+# this repository with "Contents: read and write" and "Workflows: read and write".
+# The default GITHUB_TOKEN cannot push upstream commits that touch .github/workflows.
+name: Ghostty Agents · Sync upstream
+
+on:
+  schedule:
+    - cron: "17 */3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ghostty-agents-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+  actions: write
+
+env:
+  UPSTREAM_URL: https://github.com/ghostty-org/ghostty.git
+  STAGING_BRANCH: ghostty-agents/sync
+  ISSUE_LABEL: upstream-sync
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.merge.outputs.changed }}
+      upstream_sha: ${{ steps.merge.outputs.upstream_sha }}
+    steps:
+      - name: Check token
+        env:
+          SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
+        run: |
+          if [ -z "$SYNC_TOKEN" ]; then
+            echo "::error::Missing SYNC_TOKEN secret. See the comment at the top of this workflow."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN }}
+
+      - name: Merge upstream
+        id: merge
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "$UPSTREAM_URL"
+          git fetch --no-tags upstream main
+
+          upstream_sha=$(git rev-parse upstream/main)
+          echo "upstream_sha=$upstream_sha" >> "$GITHUB_OUTPUT"
+
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "Already up to date with upstream."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          count=$(git rev-list --count HEAD..upstream/main)
+          if git merge --no-edit -m "Merge upstream ghostty-org/ghostty@${upstream_sha:0:9} ($count commits)" upstream/main; then
+            git push --force origin "HEAD:refs/heads/$STAGING_BRANCH"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            {
+              echo "Merging upstream \`ghostty-org/ghostty@${upstream_sha:0:9}\` ($count new commits) into \`${{ github.event.repository.default_branch }}\` conflicts in:"
+              echo
+              git diff --name-only --diff-filter=U | sed 's/^/- `/; s/$/`/'
+              echo
+              echo "Resolve locally:"
+              echo
+              echo '```sh'
+              echo 'git fetch upstream && git merge upstream/main'
+              echo '# fix conflicts, then'
+              echo 'git commit && git push'
+              echo '```'
+              echo
+              echo "Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            } > "$RUNNER_TEMP/conflict.md"
+            git merge --abort
+            echo "conflict=true" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+      - name: Report conflict
+        if: failure() && steps.merge.outputs.conflict == 'true'
+        run: |
+          gh label create "$ISSUE_LABEL" --color FBCA04 --description "Automatic upstream sync" 2>/dev/null || true
+          existing=$(gh issue list --label "$ISSUE_LABEL" --state open --json number --jq '.[0].number')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body-file "$RUNNER_TEMP/conflict.md"
+          else
+            gh issue create --title "Upstream sync needs a manual merge" --label "$ISSUE_LABEL" --body-file "$RUNNER_TEMP/conflict.md"
+          fi
+
+  build:
+    needs: merge
+    if: needs.merge.outputs.changed == 'true'
+    uses: ./.github/workflows/ghostty-agents-build.yml
+    with:
+      ref: ghostty-agents/sync
+
+  report-build-failure:
+    needs: [merge, build]
+    if: failure() && needs.build.result == 'failure'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Open or update issue
+        run: |
+          gh label create "$ISSUE_LABEL" --color FBCA04 --description "Automatic upstream sync" 2>/dev/null || true
+          body="Upstream \`ghostty-org/ghostty@${{ needs.merge.outputs.upstream_sha }}\` merges cleanly but the build fails, so \`main\` was not updated. The merge is on the \`$STAGING_BRANCH\` branch.
+
+          Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          existing=$(gh issue list --label "$ISSUE_LABEL" --state open --json number --jq '.[0].number')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "Upstream sync breaks the build" --label "$ISSUE_LABEL" --body "$body"
+          fi
+
+  promote:
+    needs: [merge, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.STAGING_BRANCH }}
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN }}
+
+      # Fast-forward only: if main moved since the merge, the push is rejected and the
+      # next run merges again on top of it.
+      - name: Fast-forward main
+        run: git push origin "HEAD:refs/heads/${{ github.event.repository.default_branch }}"
+
+      - name: Close sync issues
+        run: |
+          for n in $(gh issue list --label "$ISSUE_LABEL" --state open --json number --jq '.[].number'); do
+            gh issue close "$n" --comment "Resolved: synced to ghostty-org/ghostty@${{ needs.merge.outputs.upstream_sha }}."
+          done
+
+      - name: Disable upstream workflows
+        run: |
+          gh workflow list --all --json id,path,state \
+            --jq '.[] | select(.state == "active") | select(.path | test("/ghostty-agents-[^/]*$") | not) | .id' |
+          while read -r id; do
+            gh workflow disable "$id"
+          done

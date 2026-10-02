@@ -1,0 +1,142 @@
+import Foundation
+
+/// Reads the status files written by agent hooks (see `ghostty-agents/hooks/`).
+///
+/// Layout on disk, one directory per Ghostty surface:
+///
+///     $DARWIN_USER_TEMP_DIR/ghostty-agents/<surface-uuid>/<HookEventName>.json
+///
+/// Each file is `{"agent": "claude", "ts": <unix seconds>, "event": <hook payload>}`. The
+/// surface UUID reaches the hook through the `GHOSTTY_AGENTS_SURFACE_ID` environment variable
+/// that every Ghostty Agents surface is started with, so no process inspection is needed on
+/// the hook side (which matters when the agent runs inside a sandbox).
+enum AgentStatusStore {
+    /// Environment variable that carries the surface UUID into the terminal's processes.
+    static let surfaceIDEnvKey = "GHOSTTY_AGENTS_SURFACE_ID"
+
+    /// The root directory for status files. Uses the per-user temp dir so it is shared
+    /// between Ghostty and sandboxed agents, and cleared on reboot.
+    static let directory: URL = {
+        var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
+        let length = confstr(_CS_DARWIN_USER_TEMP_DIR, &buffer, buffer.count)
+        let base = length > 0
+            ? URL(fileURLWithPath: String(cString: buffer), isDirectory: true)
+            : FileManager.default.temporaryDirectory
+        return base.appendingPathComponent("ghostty-agents", isDirectory: true)
+    }()
+
+    /// The latest hook-reported state for one surface.
+    struct Status {
+        var state: AgentState
+        var agent: String?
+        var sessionID: String?
+        var lastPrompt: String?
+        var message: String?
+        var updatedAt: Date
+    }
+
+    /// Reads the status for a surface, or nil if no hook has reported for it.
+    static func status(for surfaceID: UUID) -> Status? {
+        let dir = directory.appendingPathComponent(surfaceID.uuidString, isDirectory: true)
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: dir,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else { return nil }
+
+        let events: [Event] = files
+            .filter { $0.pathExtension == "json" }
+            .compactMap { Event(url: $0) }
+            .sorted { $0.date < $1.date }
+        guard let latest = events.last(where: { $0.state != nil }) else { return nil }
+
+        let prompt = events.last { $0.name == "UserPromptSubmit" }?.payload["prompt"] as? String
+        return Status(
+            state: latest.state ?? .running,
+            agent: latest.agent,
+            sessionID: latest.payload["session_id"] as? String,
+            lastPrompt: prompt.map(firstLine),
+            message: (latest.payload["message"] as? String).map(firstLine),
+            updatedAt: latest.date)
+    }
+
+    /// Removes status for surfaces that no longer exist.
+    static func prune(keeping alive: Set<UUID>) {
+        guard let dirs = try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else { return }
+
+        for dir in dirs {
+            guard let id = UUID(uuidString: dir.lastPathComponent), !alive.contains(id) else { continue }
+            try? FileManager.default.removeItem(at: dir)
+        }
+    }
+
+    private static func firstLine(_ text: String) -> String {
+        let line = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? text
+        return line.trimmingCharacters(in: .whitespaces)
+    }
+
+    private struct Event {
+        let name: String
+        let agent: String?
+        /// When the hook wrote this event. File mtimes have sub-second precision, which
+        /// matters because several hooks often fire within the same second.
+        let date: Date
+        let payload: [String: Any]
+
+        init?(url: URL) {
+            guard let data = try? Data(contentsOf: url),
+                  let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let payload = root["event"] as? [String: Any] else { return nil }
+            self.name = payload["hook_event_name"] as? String ?? url.deletingPathExtension().lastPathComponent
+            self.agent = root["agent"] as? String
+            let mtime = try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+            self.date = mtime ?? Date(timeIntervalSince1970: (root["ts"] as? NSNumber)?.doubleValue ?? 0)
+            self.payload = payload
+        }
+
+        /// The state this event implies. Nil for events that carry no state on their own.
+        var state: AgentState? {
+            switch name {
+            case "SessionStart", "Stop":
+                return .done
+            case "UserPromptSubmit", "PreToolUse", "PostToolUse", "PreCompact":
+                return .working
+            case "Notification":
+                // Claude Code sends an idle reminder after a turn finished; that isn't new
+                // information beyond `Stop`. Everything else (permission prompts, questions)
+                // needs the user.
+                if payload["notification_type"] as? String == "idle_prompt" { return .done }
+                return .needsInput
+            default:
+                return nil
+            }
+        }
+    }
+}
+
+/// The coarse state of an agent, as shown in the sidebar.
+enum AgentState: Int, Comparable {
+    /// The agent is waiting on the user (permission prompt, question).
+    case needsInput
+    /// The agent finished its turn and is waiting for the next prompt.
+    case done
+    /// The agent is working on a prompt.
+    case working
+    /// The agent process is running but no hook has reported a state.
+    case running
+
+    static func < (lhs: AgentState, rhs: AgentState) -> Bool { lhs.rawValue < rhs.rawValue }
+
+    var label: String {
+        switch self {
+        case .needsInput: return "Needs input"
+        case .done: return "Done"
+        case .working: return "Working"
+        case .running: return "Running"
+        }
+    }
+}

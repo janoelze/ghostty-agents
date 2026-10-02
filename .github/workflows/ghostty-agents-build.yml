@@ -1,0 +1,64 @@
+# Builds the macOS app. Runs on pushes to main (uploading Ghostty.app as an artifact)
+# and is reused by ghostty-agents-sync.yml to check upstream merges before promoting them.
+name: Ghostty Agents · Build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: Git ref to build
+        type: string
+        required: true
+
+concurrency:
+  group: ghostty-agents-build-${{ inputs.ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Select Xcode 26
+        run: |
+          xcode=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -n 1)
+          sudo xcode-select -s "$xcode"
+          xcodebuild -version
+
+      - name: Install Metal Toolchain
+        run: xcodebuild -downloadComponent MetalToolchain
+
+      # Uses minimum_zig_version from build.zig.zon, so upstream Zig bumps are followed.
+      - uses: mlugg/setup-zig@v2
+
+      - name: Build GhosttyKit
+        run: zig build -Demit-macos-app=false -Dxcframework-target=native -Doptimize=ReleaseFast
+
+      - name: Build Ghostty.app
+        run: |
+          cd macos
+          xcodebuild -target Ghostty -configuration ReleaseLocal \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
+            CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO
+
+      - name: Package
+        if: inputs.ref == ''
+        run: |
+          cd macos/build/ReleaseLocal
+          ditto -c -k --keepParent Ghostty.app "$RUNNER_TEMP/Ghostty-Agents.zip"
+
+      - uses: actions/upload-artifact@v4
+        if: inputs.ref == ''
+        with:
+          name: Ghostty-Agents-${{ github.sha }}
+          path: ${{ runner.temp }}/Ghostty-Agents.zip
+          retention-days: 30
