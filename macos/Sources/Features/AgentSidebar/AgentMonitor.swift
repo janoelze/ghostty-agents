@@ -93,6 +93,16 @@ final class AgentMonitor: ObservableObject {
         }
     }
 
+    /// Agents are shown as animated cats. Needs the sprite sheet, see `CatSprite`.
+    @Published var catMode: Bool {
+        didSet { UserDefaults.standard.set(catMode, forKey: Self.catModeKey) }
+    }
+
+    func toggleCatMode() {
+        CatSprite.reload()
+        catMode = !catMode && CatSprite.isAvailable
+    }
+
     @Published var sidebarWidth: CGFloat {
         didSet { UserDefaults.standard.set(Double(sidebarWidth), forKey: Self.widthKey) }
     }
@@ -102,6 +112,7 @@ final class AgentMonitor: ObservableObject {
     private static let visibleKey = "GhosttyAgentsSidebarVisible"
     private static let widthKey = "GhosttyAgentsSidebarWidth"
     private static let collapsedKey = "GhosttyAgentsCollapsedProjects"
+    private static let catModeKey = "GhosttyAgentsCatMode"
 
     private var timer: Timer?
     private var watcher: AgentChangeWatcher?
@@ -121,6 +132,7 @@ final class AgentMonitor: ObservableObject {
         let width = defaults.double(forKey: Self.widthKey)
         sidebarWidth = width > 0 ? CGFloat(width) : 240
         collapsedProjects = Set(defaults.stringArray(forKey: Self.collapsedKey) ?? [])
+        catMode = defaults.bool(forKey: Self.catModeKey)
     }
 
     /// Starts polling. Safe to call repeatedly; called by each sidebar as it appears.

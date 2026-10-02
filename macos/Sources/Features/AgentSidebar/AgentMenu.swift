@@ -42,6 +42,10 @@ enum AgentMenu {
 
         menu.addItem(.separator())
 
+        let cats = NSMenuItem(title: "Cat Mode", action: #selector(Target.toggleCatMode(_:)), keyEquivalent: "")
+        cats.target = target
+        menu.addItem(cats)
+
         let colors = NSMenuItem(title: "Color Tabs by Project", action: #selector(Target.toggleTabColors(_:)), keyEquivalent: "")
         colors.target = target
         menu.addItem(colors)
@@ -115,6 +119,10 @@ enum AgentMenu {
             SessionSearch.shared.rebuildIndex()
         }
 
+        @objc func toggleCatMode(_ sender: Any?) {
+            AgentMonitor.shared.toggleCatMode()
+        }
+
         @objc func toggleTabColors(_ sender: Any?) {
             AgentMonitor.shared.toggleTabColors()
         }
@@ -124,6 +132,13 @@ enum AgentMenu {
                 menuItem.title = AgentMonitor.shared.isSidebarVisible ? "Hide Agent Sidebar" : "Show Agent Sidebar"
             } else if menuItem.action == #selector(toggleTabColors(_:)) {
                 menuItem.state = AgentMonitor.shared.tabColors.isEnabled ? .on : .off
+            } else if menuItem.action == #selector(toggleCatMode(_:)) {
+                menuItem.state = AgentMonitor.shared.catMode ? .on : .off
+                guard CatSprite.isAvailable else {
+                    menuItem.toolTip = "Put a cat sprite sheet at \(CatSprite.url.path)"
+                    return false
+                }
+                menuItem.toolTip = nil
             }
             return true
         }

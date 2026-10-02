@@ -105,7 +105,7 @@ struct AgentSidebarView: View {
                                 withAnimation(.easeInOut(duration: 0.15)) { monitor.toggleCollapsed(group.project) }
                             }
                             ForEach(collapsed ? [] : group.agents, id: \.agent.id) { entry in
-                                AgentRow(agent: entry.agent, position: entry.position)
+                                AgentRow(agent: entry.agent, position: entry.position, catMode: monitor.catMode)
                                     .onTapGesture { monitor.focus(entry.agent.id) }
                                     .padding(.bottom, 2)
                             }
@@ -243,13 +243,28 @@ private struct AgentGroupHeader: View {
 private struct AgentRow: View {
     let agent: AgentMonitor.Agent
     let position: Int
+    var catMode = false
 
     @State private var hovering = false
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            AgentStatusDot(state: agent.state, emphasized: agent.needsAttention)
-                .padding(.top, 4)
+            if catMode {
+                AgentCatView(state: agent.state, emphasized: agent.needsAttention, seed: agent.id.hashValue)
+                    .overlay(alignment: .bottomTrailing) {
+                        if agent.state == .needsInput {
+                            Circle().fill(Color.orange).frame(width: 6, height: 6)
+                                .offset(x: -4, y: -1)
+                        }
+                    }
+                    // The cat sits in the lower half of its cell (the top is room for jumps);
+                    // pull it up so it lines up with the row's two lines of text.
+                    .frame(width: 26, height: 22, alignment: .bottom)
+                    .padding(.top, -2)
+            } else {
+                AgentStatusDot(state: agent.state, emphasized: agent.needsAttention)
+                    .padding(.top, 4)
+            }
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack(alignment: .firstTextBaseline, spacing: 4) {
