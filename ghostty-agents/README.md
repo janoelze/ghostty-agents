@@ -59,6 +59,18 @@ auto-update to official Ghostty, signs with your code signing identity (set
 `GHOSTTY_AGENTS_SIGN_IDENTITY` if you have several) so macOS permissions stick, saves the
 official app once, and refreshes the Claude Code hooks.
 
+## Developing
+
+```sh
+ghostty-agents/dev.sh          # build Swift changes, sign, (re)open a dev instance
+ghostty-agents/dev.sh --core   # also rebuild GhosttyKit (after Zig changes or a pull)
+```
+
+Every build is signed by `ghostty-agents/sign.sh` with the same identity as the installed
+app. macOS keeps one permission record per bundle id, and all builds share Ghostty's, so a
+differently signed build (ad-hoc, CI, official Ghostty) makes macOS ask for permissions
+again and resets them for the others.
+
 ## Building
 
 Needs Xcode 26 with the Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`) and

@@ -135,26 +135,7 @@ checks=$(/usr/libexec/PlistBuddy -c 'Print :SUEnableAutomaticChecks' "$app/Conte
 # Sign
 
 step "Signing"
-identity=${GHOSTTY_AGENTS_SIGN_IDENTITY:-}
-if [ -z "$identity" ]; then
-  identities=$(security find-identity -v -p codesigning | sed -n 's/^ *[0-9]*) [0-9A-F]* "\(.*\)"$/\1/p')
-  if [ -n "$identities" ] && [ "$(printf '%s\n' "$identities" | wc -l | tr -d ' ')" = 1 ]; then
-    identity=$identities
-  else
-    identity=-
-  fi
-fi
-echo "Identity: $([ "$identity" = - ] && echo ad-hoc || echo "$identity")"
-
-entitlements=$(mktemp)
-codesign -d --entitlements :- "$app" >"$entitlements" 2>/dev/null || true
-# Nested code (Sparkle, XPC services) first, then the app with its own entitlements.
-codesign --force --deep --sign "$identity" "$app"
-if [ -s "$entitlements" ]; then
-  codesign --force --sign "$identity" --entitlements "$entitlements" "$app"
-fi
-rm -f "$entitlements"
-codesign --verify --deep "$app"
+"$repo/ghostty-agents/sign.sh" "$app"
 
 # ---------------------------------------------------------------------------
 # Install
