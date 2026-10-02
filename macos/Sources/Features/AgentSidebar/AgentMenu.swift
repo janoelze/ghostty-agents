@@ -7,6 +7,7 @@ import AppKit
 /// - ⌃⌘S  Show/Hide Agent Sidebar (the standard macOS sidebar shortcut)
 /// - ⌃⌘J  Next Agent Needing Attention
 /// - ⌃⌘1…9  Go to the agent at that position
+/// - ⌃⌘K  Search past sessions
 ///
 /// These are ordinary menu key equivalents, so a Ghostty keybind on the same key takes
 /// precedence, and they can be remapped in System Settings → Keyboard → App Shortcuts.
@@ -29,6 +30,17 @@ enum AgentMenu {
         next.keyEquivalentModifierMask = [.control, .command]
         next.target = target
         menu.addItem(next)
+
+        let searchItem = NSMenuItem(title: "Search Sessions…", action: #selector(Target.searchSessions(_:)), keyEquivalent: "k")
+        searchItem.keyEquivalentModifierMask = [.control, .command]
+        searchItem.target = target
+        menu.addItem(searchItem)
+
+        let rebuild = NSMenuItem(title: "Rebuild Search Index", action: #selector(Target.rebuildIndex(_:)), keyEquivalent: "")
+        rebuild.target = target
+        menu.addItem(rebuild)
+
+        menu.addItem(.separator())
 
         let colors = NSMenuItem(title: "Color Tabs by Project", action: #selector(Target.toggleTabColors(_:)), keyEquivalent: "")
         colors.target = target
@@ -93,6 +105,14 @@ enum AgentMenu {
         @objc func goToAgent(_ sender: NSMenuItem) {
             guard let id = sender.representedObject as? UUID else { return }
             AgentMonitor.shared.focus(id)
+        }
+
+        @objc func searchSessions(_ sender: Any?) {
+            SessionSearch.shared.focusField()
+        }
+
+        @objc func rebuildIndex(_ sender: Any?) {
+            SessionSearch.shared.rebuildIndex()
         }
 
         @objc func toggleTabColors(_ sender: Any?) {

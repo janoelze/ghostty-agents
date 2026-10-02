@@ -12,6 +12,8 @@ final class AgentMonitor: ObservableObject {
         /// The surface UUID. Also the AppleScript `id` of the terminal.
         let id: UUID
         let name: String
+        /// The agent's session id as reported by its hooks, used to match search results.
+        let sessionID: String?
         let title: String
         /// The agent's working directory, abbreviated with `~`.
         let directory: String?
@@ -134,6 +136,12 @@ final class AgentMonitor: ObservableObject {
         controller.focusSurface(surface)
     }
 
+    /// Returns keyboard focus to the terminal that last had it (e.g. after leaving search).
+    func focusLastTerminal() {
+        guard let id = lastFocusedID else { return }
+        focus(id)
+    }
+
     /// Focuses the agent at a 1-based position in the sidebar.
     func focus(position: Int) {
         guard position >= 1, position <= agents.count else { return }
@@ -245,6 +253,7 @@ final class AgentMonitor: ObservableObject {
         return Agent(
             id: surface.id,
             name: name,
+            sessionID: status?.sessionID,
             title: Self.title(surface.title, prompt: status?.lastPrompt, name: name),
             directory: cwd.map { ($0 as NSString).abbreviatingWithTildeInPath },
             project: project(for: cwd),

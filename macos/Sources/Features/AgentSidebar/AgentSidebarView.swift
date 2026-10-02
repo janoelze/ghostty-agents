@@ -53,9 +53,34 @@ struct AgentSidebarStyle {
 
 struct AgentSidebarView: View {
     @ObservedObject var monitor: AgentMonitor
+    @ObservedObject private var search = SessionSearch.shared
     let style: AgentSidebarStyle
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SessionSearchField(search: search, colorScheme: style.colorScheme)
+                .padding(.horizontal, 10)
+                .padding(.top, 8)
+                .padding(.bottom, 2)
+
+            if search.isActive {
+                SessionResultsView(search: search, monitor: monitor)
+            } else {
+                agentList
+            }
+
+            Spacer(minLength: 0)
+
+            SidebarStatusLine(monitor: monitor, search: search, divider: style.divider)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(style.background.ignoresSafeArea())
+        .environment(\.colorScheme, style.colorScheme)
+        .onAppear { search.start() }
+    }
+
+    @ViewBuilder
+    private var agentList: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
 
@@ -78,9 +103,6 @@ struct AgentSidebarView: View {
                 }
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(style.background.ignoresSafeArea())
-        .environment(\.colorScheme, style.colorScheme)
     }
 
     private var header: some View {
