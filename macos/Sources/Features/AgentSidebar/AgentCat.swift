@@ -76,18 +76,31 @@ struct AgentCatView: View {
 
     private static let segmentLength: TimeInterval = 3.2
 
+    /// The part of each 32×32 cell the cat occupies in its resting poses (measured on the
+    /// sheet). Only this area sizes the view; jumps rise above it without being clipped.
+    static let content = CGRect(x: 7, y: 18, width: 18, height: 14)
+
+    /// Points per sprite pixel. 2 keeps pixels whole on Retina displays (4 device pixels)
+    /// and makes a sitting cat about as tall as the row's two lines of text.
+    static let scale: CGFloat = 2
+
+    static var size: CGSize {
+        CGSize(width: content.width * scale, height: content.height * scale)
+    }
+
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1.0 / 12)) { context in
             let (animation, index) = pick(at: context.date.timeIntervalSinceReferenceDate)
-            if let image = CatSprite.frame(animation, index: index) {
-                // One point per sprite pixel: pixel art stays crisp at whole-number scales.
-                Image(decorative: image, scale: 1)
-                    .interpolation(.none)
-                    .resizable()
-                    .frame(width: 32, height: 32)
-            } else {
-                Color.clear.frame(width: 32, height: 32)
+            ZStack(alignment: .topLeading) {
+                if let image = CatSprite.frame(animation, index: index) {
+                    Image(decorative: image, scale: 1)
+                        .interpolation(.none)
+                        .resizable()
+                        .frame(width: 32 * Self.scale, height: 32 * Self.scale)
+                        .offset(x: -Self.content.minX * Self.scale, y: -Self.content.minY * Self.scale)
+                }
             }
+            .frame(width: Self.size.width, height: Self.size.height, alignment: .topLeading)
         }
         .accessibilityHidden(true)
     }

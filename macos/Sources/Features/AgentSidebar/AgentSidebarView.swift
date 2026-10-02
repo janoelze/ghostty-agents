@@ -254,13 +254,10 @@ private struct AgentRow: View {
                     .overlay(alignment: .bottomTrailing) {
                         if agent.state == .needsInput {
                             Circle().fill(Color.orange).frame(width: 6, height: 6)
-                                .offset(x: -4, y: -1)
+                                .offset(x: 2, y: 1)
                         }
                     }
-                    // The cat sits in the lower half of its cell (the top is room for jumps);
-                    // pull it up so it lines up with the row's two lines of text.
-                    .frame(width: 26, height: 22, alignment: .bottom)
-                    .padding(.top, -2)
+                    .padding(.top, 2)
             } else {
                 AgentStatusDot(state: agent.state, emphasized: agent.needsAttention)
                     .padding(.top, 4)
