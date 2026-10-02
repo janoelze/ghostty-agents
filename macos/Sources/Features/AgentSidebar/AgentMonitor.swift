@@ -13,16 +13,66 @@ final class AgentMonitor: ObservableObject {
         let id: UUID
         let name: String
         let title: String
+        /// The agent's working directory, abbreviated with `~`.
         let directory: String?
+        let project: Project
         let state: AgentState
-        let detail: String?
+        /// The second line of the row: what the agent is doing, or what it is asking.
+        let detail: String
         let since: Date?
         let isFocused: Bool
         /// Waiting on the user, or finished and not looked at since.
         let needsAttention: Bool
     }
 
+    /// The git repository (or plain directory) an agent works in. Rows are grouped by this.
+    struct Project: Hashable {
+        let path: String
+        let name: String
+        let branch: String?
+    }
+
+    struct Group: Identifiable, Equatable {
+        var id: String { project.path }
+        let project: Project
+        /// The project's color, also used for its tabs. Nil when tab coloring is off.
+        let color: TerminalTabColor?
+        let agents: [(position: Int, agent: Agent)]
+
+        static func == (lhs: Group, rhs: Group) -> Bool {
+            lhs.project == rhs.project && lhs.color == rhs.color && lhs.agents.map(\.agent) == rhs.agents.map(\.agent)
+        }
+    }
+
+    /// Agents in tab and split order, which is also the order of the ⌃⌘1…9 shortcuts.
     @Published private(set) var agents: [Agent] = []
+
+    /// Agents grouped by project, in order of each project's first agent.
+    var groups: [Group] {
+        var order: [Project] = []
+        var members: [Project: [(Int, Agent)]] = [:]
+        for (offset, agent) in agents.enumerated() {
+            if members[agent.project] == nil { order.append(agent.project) }
+            members[agent.project, default: []].append((offset + 1, agent))
+        }
+        return order.map {
+            Group(
+                project: $0,
+                color: tabColors.isEnabled ? projectColors[$0.path] : nil,
+                agents: members[$0] ?? [])
+        }
+    }
+
+    /// Colors per project path. See `AgentTabColors`.
+    @Published private(set) var projectColors: [String: TerminalTabColor] = [:]
+
+    let tabColors = AgentTabColors()
+
+    func toggleTabColors() {
+        tabColors.isEnabled.toggle()
+        objectWillChange.send()
+        refresh()
+    }
 
     @Published var isSidebarVisible: Bool {
         didSet { UserDefaults.standard.set(isSidebarVisible, forKey: Self.visibleKey) }
@@ -43,7 +93,7 @@ final class AgentMonitor: ObservableObject {
     /// sidebar still shows where you were.
     private var lastFocusedID: UUID?
     private var surfaces: [UUID: Weak<Ghostty.SurfaceView>] = [:]
-    private var firstSeen: [UUID: Date] = [:]
+    private var gitRoots: [String: String?] = [:]
     private var lastViewed: [UUID: Date] = [:]
 
     private init() {
@@ -118,23 +168,32 @@ final class AgentMonitor: ObservableObject {
         var alive: Set<UUID> = []
         var newSurfaces: [UUID: Weak<Ghostty.SurfaceView>] = [:]
 
-        for controller in TerminalController.all {
+        var tabs: [(window: TerminalWindow, project: String?)] = []
+
+        for controller in Self.controllersInTabOrder() {
+            var tabAgents: [Agent] = []
             for surface in controller.surfaceTree.root?.leaves() ?? [] {
                 alive.insert(surface.id)
                 newSurfaces[surface.id] = Weak(surface)
                 if let agent = agent(for: surface, focusedID: focusedID) {
-                    found.append(agent)
+                    tabAgents.append(agent)
                 }
+            }
+            found += tabAgents
+
+            // A tab takes the color of its focused agent, or its first one.
+            if let window = controller.window as? TerminalWindow {
+                let main = tabAgents.first { $0.id == controller.focusedSurface?.id } ?? tabAgents.first
+                tabs.append((window, main?.project.path))
             }
         }
 
+        let colors = AgentTabColors.assign(found.map(\.project))
+        if colors != projectColors { projectColors = colors }
+        tabColors.apply(tabs, colors: colors)
+
         surfaces = newSurfaces
-        firstSeen = firstSeen.filter { alive.contains($0.key) }
         lastViewed = lastViewed.filter { alive.contains($0.key) }
-        for agent in found where firstSeen[agent.id] == nil {
-            firstSeen[agent.id] = Date()
-        }
-        found.sort { (firstSeen[$0.id] ?? .distantPast) < (firstSeen[$1.id] ?? .distantPast) }
 
         if found != agents { agents = found }
         AgentMenu.update(agents: agents)
@@ -172,27 +231,94 @@ final class AgentMonitor: ObservableObject {
         let inView = isFocused && NSApp.isActive
         let needsAttention = !inView && (state == .needsInput || (state == .done && viewed < (since ?? .distantPast)))
 
-        let directory = surface.pwd.flatMap { $0.isEmpty ? nil : ($0 as NSString).abbreviatingWithTildeInPath }
+        let detail: String
+        switch state {
+        case .needsInput: detail = status?.message ?? "Waiting for input"
+        case .working: detail = status?.activity ?? "Thinking…"
+        case .done: detail = "Done"
+        case .running: detail = name
+        }
+
+        // The agent's own cwd is more accurate than the shell's, which only knows where
+        // the agent was started.
+        let cwd = status?.cwd ?? surface.pwd.flatMap { $0.isEmpty ? nil : $0 }
         return Agent(
             id: surface.id,
             name: name,
-            title: Self.title(surface.title, prompt: status?.lastPrompt, directory: directory, name: name),
-            directory: directory,
+            title: Self.title(surface.title, prompt: status?.lastPrompt, name: name),
+            directory: cwd.map { ($0 as NSString).abbreviatingWithTildeInPath },
+            project: project(for: cwd),
             state: state,
-            detail: state == .needsInput ? status?.message : status?.lastPrompt,
+            detail: detail,
             since: since,
             isFocused: isFocused,
             needsAttention: needsAttention)
     }
 
+    // MARK: Ordering and projects
+
+    /// Terminal windows in the order they appear: windows by when they were opened, tabs
+    /// left to right within each window.
+    private static func controllersInTabOrder() -> [TerminalController] {
+        func key(_ controller: TerminalController) -> (Int, Int) {
+            guard let window = controller.window else { return (Int.max, Int.max) }
+            let tabs = window.tabGroup?.windows ?? [window]
+            let group = tabs.map(\.windowNumber).min() ?? window.windowNumber
+            return (group, tabs.firstIndex(of: window) ?? 0)
+        }
+        return TerminalController.all.sorted { key($0) < key($1) }
+    }
+
+    private func project(for cwd: String?) -> Project {
+        guard let cwd else { return Project(path: "", name: "Other", branch: nil) }
+        guard let root = gitRoot(for: cwd) else {
+            return Project(path: cwd, name: (cwd as NSString).lastPathComponent, branch: nil)
+        }
+        return Project(path: root, name: (root as NSString).lastPathComponent, branch: Self.branch(ofRepo: root))
+    }
+
+    /// The nearest enclosing directory with a `.git`, cached per directory.
+    private func gitRoot(for directory: String) -> String? {
+        if let cached = gitRoots[directory] { return cached }
+        var current = (directory as NSString).standardizingPath
+        var root: String?
+        while true {
+            if FileManager.default.fileExists(atPath: (current as NSString).appendingPathComponent(".git")) {
+                root = current
+                break
+            }
+            let parent = (current as NSString).deletingLastPathComponent
+            if parent == current || parent.isEmpty { break }
+            current = parent
+        }
+        gitRoots[directory] = root
+        return root
+    }
+
+    /// The checked out branch, or a short commit hash when detached. Read on every refresh
+    /// since it is one small file and branches change.
+    private static func branch(ofRepo root: String) -> String? {
+        var gitDir = (root as NSString).appendingPathComponent(".git")
+        // Worktrees and submodules have a `.git` file pointing at the real git dir.
+        if let pointer = try? String(contentsOfFile: gitDir, encoding: .utf8), pointer.hasPrefix("gitdir:") {
+            let path = pointer.dropFirst("gitdir:".count).trimmingCharacters(in: .whitespacesAndNewlines)
+            gitDir = path.hasPrefix("/") ? path : (root as NSString).appendingPathComponent(path)
+        }
+        guard let head = try? String(contentsOfFile: (gitDir as NSString).appendingPathComponent("HEAD"), encoding: .utf8)
+        else { return nil }
+        let trimmed = head.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("ref: refs/heads/") { return String(trimmed.dropFirst("ref: refs/heads/".count)) }
+        return String(trimmed.prefix(7))
+    }
+
     /// Agents decorate titles with spinners and status glyphs; strip those and fall back to
-    /// the last prompt or the directory when the title says nothing useful.
-    private static func title(_ raw: String, prompt: String?, directory: String?, name: String) -> String {
+    /// the last prompt when the title says nothing useful. The directory is never used here;
+    /// it is already in the group header.
+    private static func title(_ raw: String, prompt: String?, name: String) -> String {
         let trimmed = String(raw.drop { !$0.isLetter && !$0.isNumber }).trimmingCharacters(in: .whitespaces)
         let generic: Set<String> = [name.lowercased(), "claude", "claude code", "ghostty", ""]
         if !generic.contains(trimmed.lowercased()) { return trimmed }
         if let prompt, !prompt.isEmpty { return prompt }
-        if let directory { return (directory as NSString).lastPathComponent }
         return name
     }
 }

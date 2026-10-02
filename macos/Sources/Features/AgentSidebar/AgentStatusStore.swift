@@ -32,6 +32,10 @@ enum AgentStatusStore {
         var sessionID: String?
         var lastPrompt: String?
         var message: String?
+        /// What the agent is doing right now, e.g. "Editing AgentMonitor.swift".
+        var activity: String?
+        /// The agent's working directory as it reports it.
+        var cwd: String?
         var updatedAt: Date
     }
 
@@ -50,13 +54,24 @@ enum AgentStatusStore {
             .sorted { $0.date < $1.date }
         guard let latest = events.last(where: { $0.state != nil }) else { return nil }
 
-        let prompt = events.last { $0.name == "UserPromptSubmit" }?.payload["prompt"] as? String
+        let promptEvent = events.last { $0.name == "UserPromptSubmit" }
+        let prompt = promptEvent?.payload["prompt"] as? String
+
+        // The tool call in progress, if it belongs to the current prompt.
+        var activity: String?
+        if let tool = events.last(where: { $0.name == "PreToolUse" }),
+           tool.date >= (promptEvent?.date ?? .distantPast) {
+            activity = describeTool(tool.payload)
+        }
+
         return Status(
             state: latest.state ?? .running,
             agent: latest.agent,
             sessionID: latest.payload["session_id"] as? String,
             lastPrompt: prompt.map(firstLine),
             message: (latest.payload["message"] as? String).map(firstLine),
+            activity: activity,
+            cwd: events.last { $0.payload["cwd"] is String }?.payload["cwd"] as? String,
             updatedAt: latest.date)
     }
 
@@ -77,6 +92,40 @@ enum AgentStatusStore {
             let modified = try? dir.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
             guard let modified, modified < cutoff else { continue }
             try? FileManager.default.removeItem(at: dir)
+        }
+    }
+
+    /// A short description of a tool call from a `PreToolUse` payload.
+    private static func describeTool(_ payload: [String: Any]) -> String? {
+        guard let tool = payload["tool_name"] as? String else { return nil }
+        let input = payload["tool_input"] as? [String: Any] ?? [:]
+        func file(_ key: String = "file_path") -> String? {
+            (input[key] as? String).map { ($0 as NSString).lastPathComponent }
+        }
+
+        switch tool {
+        case "Bash":
+            if let description = input["description"] as? String, !description.isEmpty {
+                return firstLine(description)
+            }
+            return (input["command"] as? String).map { firstLine($0) }
+        case "Edit", "MultiEdit": return file().map { "Editing \($0)" }
+        case "Write": return file().map { "Writing \($0)" }
+        case "Read": return file().map { "Reading \($0)" }
+        case "NotebookEdit": return file("notebook_path").map { "Editing \($0)" }
+        case "Grep", "Glob": return (input["pattern"] as? String).map { "Searching \($0)" }
+        case "WebFetch":
+            let host = (input["url"] as? String).flatMap { URL(string: $0)?.host }
+            return host.map { "Fetching \($0)" } ?? "Fetching"
+        case "WebSearch": return (input["query"] as? String).map { "Searching the web: \($0)" }
+        case "Task", "Agent": return (input["description"] as? String).map { "Subagent: \($0)" }
+        case "TodoWrite": return "Updating todos"
+        default:
+            // MCP tools are named mcp__<server>__<tool>.
+            if tool.hasPrefix("mcp__") {
+                return tool.split(separator: "_", omittingEmptySubsequences: true).dropFirst().joined(separator: " ")
+            }
+            return tool
         }
     }
 

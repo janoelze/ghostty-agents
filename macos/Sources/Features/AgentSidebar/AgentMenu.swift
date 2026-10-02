@@ -30,6 +30,10 @@ enum AgentMenu {
         next.target = target
         menu.addItem(next)
 
+        let colors = NSMenuItem(title: "Color Tabs by Project", action: #selector(Target.toggleTabColors(_:)), keyEquivalent: "")
+        colors.target = target
+        menu.addItem(colors)
+
         menu.addItem(.separator())
 
         let item = NSMenuItem(title: "Agents", action: nil, keyEquivalent: "")
@@ -91,9 +95,15 @@ enum AgentMenu {
             AgentMonitor.shared.focus(id)
         }
 
+        @objc func toggleTabColors(_ sender: Any?) {
+            AgentMonitor.shared.toggleTabColors()
+        }
+
         func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
             if menuItem.action == #selector(toggleSidebar(_:)) {
                 menuItem.title = AgentMonitor.shared.isSidebarVisible ? "Hide Agent Sidebar" : "Show Agent Sidebar"
+            } else if menuItem.action == #selector(toggleTabColors(_:)) {
+                menuItem.state = AgentMonitor.shared.tabColors.isEnabled ? .on : .off
             }
             return true
         }

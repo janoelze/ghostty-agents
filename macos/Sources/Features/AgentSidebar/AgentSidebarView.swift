@@ -63,10 +63,14 @@ struct AgentSidebarView: View {
                 emptyState
             } else {
                 ScrollView {
-                    LazyVStack(spacing: 2) {
-                        ForEach(Array(monitor.agents.enumerated()), id: \.element.id) { offset, agent in
-                            AgentRow(agent: agent, position: offset + 1)
-                                .onTapGesture { monitor.focus(agent.id) }
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(monitor.groups) { group in
+                            AgentGroupHeader(project: group.project, color: group.color)
+                            ForEach(group.agents, id: \.agent.id) { entry in
+                                AgentRow(agent: entry.agent, position: entry.position)
+                                    .onTapGesture { monitor.focus(entry.agent.id) }
+                                    .padding(.bottom, 2)
+                            }
                         }
                     }
                     .padding(.horizontal, 6)
@@ -118,6 +122,47 @@ struct AgentSidebarView: View {
     }
 }
 
+/// The project a group of agents works in: repository name and branch.
+private struct AgentGroupHeader: View {
+    let project: AgentMonitor.Project
+    let color: TerminalTabColor?
+
+    var body: some View {
+        HStack(spacing: 6) {
+            if let swatch = color?.displayColor {
+                RoundedRectangle(cornerRadius: 2, style: .continuous)
+                    .fill(Color(nsColor: swatch))
+                    .frame(width: 8, height: 8)
+            }
+
+            Text(project.name)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            Spacer(minLength: 4)
+
+            if let branch = project.branch {
+                HStack(spacing: 3) {
+                    Image(systemName: "arrow.triangle.branch")
+                        .font(.system(size: 9))
+                    Text(branch)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                .font(.system(size: 10.5))
+                .foregroundStyle(.tertiary)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.top, 10)
+        .padding(.bottom, 3)
+        .help(project.path)
+    }
+}
+
+/// One agent: the task on the first line, what it is doing or asking on the second.
 private struct AgentRow: View {
     let agent: AgentMonitor.Agent
     let position: Int
@@ -130,47 +175,22 @@ private struct AgentRow: View {
                 .padding(.top, 4)
 
             VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 4) {
+                HStack(alignment: .firstTextBaseline, spacing: 4) {
                     Text(agent.title)
                         .font(.system(size: 12, weight: agent.needsAttention ? .semibold : .regular))
                         .lineLimit(1)
                         .truncationMode(.tail)
 
-                    Spacer(minLength: 4)
+                    Spacer(minLength: 6)
 
-                    if hovering && position <= 9 {
-                        Text("⌃⌘\(position)")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.tertiary)
-                    }
+                    trailing
                 }
 
-                HStack(spacing: 4) {
-                    Text(agent.state.label)
-                        .foregroundStyle(agent.state == .needsInput ? AnyShapeStyle(Color.orange) : AnyShapeStyle(HierarchicalShapeStyle.secondary))
-                    if let since = agent.since {
-                        Text("·")
-                        TimelineView(.periodic(from: .now, by: 15)) { context in
-                            Text(Self.shortAge(since, now: context.date))
-                        }
-                    }
-                    if let directory = agent.directory {
-                        Text("·")
-                        Text((directory as NSString).lastPathComponent)
-                            .truncationMode(.middle)
-                    }
-                }
-                .font(.system(size: 10.5))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-
-                if let detail = agent.detail, detail != agent.title {
-                    Text(detail)
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                }
+                Text(agent.detail)
+                    .font(.system(size: 11))
+                    .foregroundStyle(detailStyle)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
             }
         }
         .padding(.vertical, 6)
@@ -181,10 +201,34 @@ private struct AgentRow: View {
                 .fill(Color.primary.opacity(agent.isFocused ? 0.12 : hovering ? 0.06 : 0)))
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
-        .help([agent.name, agent.directory].compactMap { $0 }.joined(separator: " — "))
+        .help([agent.name, agent.directory].compactMap { $0 }.joined(separator: " · "))
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(agent.name): \(agent.title), \(agent.state.label)")
+        .accessibilityLabel("\(agent.name): \(agent.title), \(agent.state.label), \(agent.detail)")
         .accessibilityAddTraits(.isButton)
+    }
+
+    /// The shortcut while hovering; otherwise how long the agent has been waiting or done.
+    @ViewBuilder
+    private var trailing: some View {
+        if hovering && position <= 9 {
+            Text("⌃⌘\(position)")
+                .font(.system(size: 10.5))
+                .foregroundStyle(.tertiary)
+        } else if let since = agent.since, agent.state == .needsInput || agent.state == .done {
+            TimelineView(.periodic(from: .now, by: 15)) { context in
+                Text(Self.shortAge(since, now: context.date))
+                    .font(.system(size: 10.5).monospacedDigit())
+                    .foregroundStyle(agent.needsAttention ? AnyShapeStyle(HierarchicalShapeStyle.secondary) : AnyShapeStyle(HierarchicalShapeStyle.tertiary))
+            }
+        }
+    }
+
+    private var detailStyle: AnyShapeStyle {
+        switch agent.state {
+        case .needsInput: return AnyShapeStyle(Color.orange)
+        case .working: return AnyShapeStyle(HierarchicalShapeStyle.secondary)
+        case .done, .running: return AnyShapeStyle(HierarchicalShapeStyle.tertiary)
+        }
     }
 
     private static func shortAge(_ date: Date, now: Date) -> String {
