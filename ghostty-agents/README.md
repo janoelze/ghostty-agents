@@ -42,6 +42,10 @@ same id as the AppleScript `terminal` id), and the hook writes the raw hook payl
 `$(getconf DARWIN_USER_TEMP_DIR)ghostty-agents/<uuid>/<Event>.json`. Other agents can report
 status the same way.
 
+If agents run through a sandbox wrapper that cleans the environment, let
+`GHOSTTY_AGENTS_SURFACE_ID` through, or the sidebar only shows "Running". For
+[Agent Safehouse](https://github.com/eugene1g/agent-safehouse): `safehouse --env-pass=GHOSTTY_AGENTS_SURFACE_ID …`.
+
 ## Building
 
 Needs Xcode 26 with the Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`) and
