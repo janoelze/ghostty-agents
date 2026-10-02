@@ -1,3 +1,21 @@
+<!-- GHOSTTY AGENTS: this block is the fork's only change to upstream's README; keep it self-contained. -->
+> [!NOTE]
+> **This is Ghostty Agents**, a soft fork of Ghostty for working with many coding agents at
+> once. Everything below this note is upstream's README.
+>
+> - **Agent sidebar** — lists the Claude Code, Codex and other agents running in your tabs and
+>   splits, grouped by project, with what each is doing right now, what it's asking, or that
+>   it's done. Jump with ⌃⌘J (next agent needing you) or ⌃⌘1…9.
+> - **Session search** (⌃⌘K) — fuzzy full-text search over all past Claude Code and Codex
+>   sessions; resume one in a new tab.
+> - **Project colors** for tabs, an optional **Cat Mode**, and Claude Code hooks for live status.
+> - **Stays compatible** — new code lives in its own files, upstream is merged automatically
+>   every three hours, and settings, themes and keybinds are shared with Ghostty.
+>
+> Install (macOS): `ghostty-agents/install.sh` — re-run it to update. Details, shortcuts and how
+> it works: [ghostty-agents/README.md](ghostty-agents/README.md).
+<!-- /GHOSTTY AGENTS -->
+
 <!-- LOGO -->
 <h1>
 <p align="center">
