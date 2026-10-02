@@ -44,7 +44,7 @@ status the same way.
 
 If agents run through a sandbox wrapper that cleans the environment, let
 `GHOSTTY_AGENTS_SURFACE_ID` through, or the sidebar only shows "Running". For
-[Agent Safehouse](https://github.com/eugene1g/agent-safehouse): `safehouse --env-pass=GHOSTTY_AGENTS_SURFACE_ID …`.
+Agent Safehouse: `safehouse --env-pass=GHOSTTY_AGENTS_SURFACE_ID …`.
 
 ## Building
 
