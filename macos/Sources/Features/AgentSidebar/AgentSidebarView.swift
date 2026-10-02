@@ -21,7 +21,11 @@ struct AgentSidebarLayout<Content: View>: View {
                 let style = AgentSidebarStyle(config: ghostty.config)
                 AgentSidebarView(monitor: monitor, style: style)
                     .frame(width: monitor.sidebarWidth)
-                AgentSidebarResizeHandle(width: $monitor.sidebarWidth, color: style.divider)
+                    .overlay(alignment: .trailing) {
+                        AgentSidebarResizeHandle(width: $monitor.sidebarWidth, color: style.divider)
+                            .frame(width: AgentSidebarResizeHandle.hitWidth)
+                            .accessibilityHidden(true)
+                    }
             }
 
             content
@@ -225,35 +229,99 @@ private struct AgentStatusDot: View {
     }
 }
 
-/// A divider that can be dragged to resize the sidebar. The hit area is wider than the line.
-struct AgentSidebarResizeHandle: View {
+/// The sidebar's right edge: a divider line that can be dragged to resize the sidebar.
+///
+/// This is AppKit rather than a SwiftUI gesture so the resize cursor is reliable: it uses a
+/// cursor rect plus cursor-update tracking, and sits entirely inside the sidebar so the
+/// terminal's own cursor handling never competes with it.
+struct AgentSidebarResizeHandle: NSViewRepresentable {
     @Binding var width: CGFloat
     let color: Color
 
-    @State private var dragStartWidth: CGFloat?
+    static let hitWidth: CGFloat = 7
 
-    var body: some View {
-        Rectangle()
-            .fill(color)
-            .frame(width: 1)
-            .overlay(
-                Color.clear
-                    .frame(width: 8)
-                    .contentShape(Rectangle())
-                    .onHover { inside in
-                        if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
-                    }
-                    .gesture(
-                        DragGesture(minimumDistance: 1, coordinateSpace: .global)
-                            .onChanged { value in
-                                let start = dragStartWidth ?? width
-                                dragStartWidth = start
-                                width = min(max(start + value.translation.width, AgentMonitor.minWidth), AgentMonitor.maxWidth)
-                            }
-                            .onEnded { _ in dragStartWidth = nil }
-                    )
-                    .onTapGesture(count: 2) { width = 240 }
-            )
-            .accessibilityHidden(true)
+    func makeNSView(context: Context) -> HandleView {
+        let view = HandleView()
+        update(view)
+        return view
+    }
+
+    func updateNSView(_ view: HandleView, context: Context) {
+        update(view)
+    }
+
+    private func update(_ view: HandleView) {
+        view.lineColor = NSColor(color)
+        view.currentWidth = { width }
+        view.setWidth = { width = min(max($0, AgentMonitor.minWidth), AgentMonitor.maxWidth) }
+    }
+
+    final class HandleView: NSView {
+        var lineColor: NSColor = .separatorColor { didSet { needsDisplay = true } }
+        var currentWidth: () -> CGFloat = { 0 }
+        var setWidth: (CGFloat) -> Void = { _ in }
+
+        private var dragStart: (mouseX: CGFloat, width: CGFloat)?
+        private var hovering = false { didSet { needsDisplay = true } }
+
+        override var mouseDownCanMoveWindow: Bool { false }
+        override var isFlipped: Bool { true }
+
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            for area in trackingAreas { removeTrackingArea(area) }
+            addTrackingArea(NSTrackingArea(
+                rect: bounds,
+                options: [.mouseEnteredAndExited, .cursorUpdate, .activeAlways, .inVisibleRect],
+                owner: self))
+        }
+
+        override func resetCursorRects() {
+            addCursorRect(bounds, cursor: .resizeLeftRight)
+        }
+
+        override func cursorUpdate(with event: NSEvent) {
+            NSCursor.resizeLeftRight.set()
+        }
+
+        override func mouseEntered(with event: NSEvent) { hovering = true }
+        override func mouseExited(with event: NSEvent) { if dragStart == nil { hovering = false } }
+
+        override func mouseDown(with event: NSEvent) {
+            if event.clickCount == 2 {
+                setWidth(240)
+                return
+            }
+            dragStart = (event.locationInWindow.x, currentWidth())
+            NSCursor.resizeLeftRight.set()
+        }
+
+        override func mouseDragged(with event: NSEvent) {
+            guard let dragStart else { return }
+            setWidth(dragStart.width + event.locationInWindow.x - dragStart.mouseX)
+            NSCursor.resizeLeftRight.set()
+        }
+
+        override func mouseUp(with event: NSEvent) {
+            dragStart = nil
+            let inside = bounds.contains(convert(event.locationInWindow, from: nil))
+            hovering = inside
+            window?.invalidateCursorRects(for: self)
+        }
+
+        override func draw(_ dirtyRect: NSRect) {
+            // The divider line sits on the right edge, next to the terminal.
+            let active = hovering || dragStart != nil
+            let lineWidth: CGFloat = active ? 2 : 1
+            let line = NSRect(x: bounds.maxX - lineWidth, y: 0, width: lineWidth, height: bounds.height)
+            (active ? NSColor.controlAccentColor.withAlphaComponent(0.6) : lineColor).setFill()
+            line.fill()
+
+            // A grip in the middle while hovering, so the edge reads as draggable.
+            guard active else { return }
+            let grip = NSRect(x: bounds.maxX - 5, y: bounds.midY - 16, width: 4, height: 32)
+            NSColor.controlAccentColor.setFill()
+            NSBezierPath(roundedRect: grip, xRadius: 2, yRadius: 2).fill()
+        }
     }
 }

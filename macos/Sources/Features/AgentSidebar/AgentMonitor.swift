@@ -38,6 +38,10 @@ final class AgentMonitor: ObservableObject {
     private static let widthKey = "GhosttyAgentsSidebarWidth"
 
     private var timer: Timer?
+    private var watcher: AgentChangeWatcher?
+    /// The last terminal that had focus. Kept while Ghostty is in the background so the
+    /// sidebar still shows where you were.
+    private var lastFocusedID: UUID?
     private var surfaces: [UUID: Weak<Ghostty.SurfaceView>] = [:]
     private var firstSeen: [UUID: Date] = [:]
     private var lastViewed: [UUID: Date] = [:]
@@ -54,9 +58,15 @@ final class AgentMonitor: ObservableObject {
         guard timer == nil else { return }
         AgentMenu.install()
         refresh()
+        watcher = AgentChangeWatcher { [weak self] in self?.refresh() }
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
         }
+    }
+
+    /// Called by the status file watcher.
+    func statusDidChange() {
+        refresh()
     }
 
     func toggleSidebar() {
@@ -98,8 +108,11 @@ final class AgentMonitor: ObservableObject {
     // MARK: Polling
 
     func refresh() {
-        let focusedID = (NSApp.keyWindow?.windowController as? BaseTerminalController)?.focusedSurface?.id
-        if let focusedID { lastViewed[focusedID] = Date() }
+        if let current = (NSApp.keyWindow?.windowController as? BaseTerminalController)?.focusedSurface?.id {
+            lastFocusedID = current
+        }
+        let focusedID = lastFocusedID
+        if let focusedID, NSApp.isActive { lastViewed[focusedID] = Date() }
 
         var found: [Agent] = []
         var alive: Set<UUID> = []
@@ -156,7 +169,8 @@ final class AgentMonitor: ObservableObject {
         let since = status?.updatedAt
         let isFocused = surface.id == focusedID
         let viewed = lastViewed[surface.id] ?? .distantPast
-        let needsAttention = !isFocused && (state == .needsInput || (state == .done && viewed < (since ?? .distantPast)))
+        let inView = isFocused && NSApp.isActive
+        let needsAttention = !inView && (state == .needsInput || (state == .done && viewed < (since ?? .distantPast)))
 
         let directory = surface.pwd.flatMap { $0.isEmpty ? nil : ($0 as NSString).abbreviatingWithTildeInPath }
         return Agent(
