@@ -139,38 +139,13 @@ final class SessionSearch: ObservableObject {
             return
         }
 
-        guard let ghostty = (NSApp.delegate as? AppDelegate)?.ghostty else { return }
-        var config = Ghostty.SurfaceConfiguration()
-        if let cwd = hit.cwd, FileManager.default.fileExists(atPath: cwd) {
-            config.workingDirectory = cwd
-        }
-        // Typed into the user's shell rather than run as the tab's command, so shell
-        // functions and wrappers around `claude` / `codex` apply as usual.
-        config.initialInput = Self.resumeCommand(for: hit) + "\n"
-
-        let parent = (NSApp.keyWindow?.windowController as? TerminalController)?.window
-            ?? TerminalController.all.first?.window
-        _ = TerminalController.newTab(ghostty, from: parent, withBaseConfig: config)
+        AgentLauncher.open(hit.session)
         query = ""
     }
+}
 
-    static func resumeCommand(for hit: SessionHit) -> String {
-        switch hit.agent {
-        case .claude:
-            let command = "claude --resume \(shellQuoted(hit.sessionID))"
-            let defaultDir = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".claude").resolvingSymlinksInPath().path
-            if let dir = hit.configDir, !dir.isEmpty, dir != defaultDir {
-                return "CLAUDE_CONFIG_DIR=\(shellQuoted(dir)) \(command)"
-            }
-            return command
-        case .codex:
-            return "codex resume \(shellQuoted(hit.sessionID))"
-        }
-    }
-
-    private static func shellQuoted(_ text: String) -> String {
-        if text.allSatisfy({ $0.isLetter || $0.isNumber || "-_./".contains($0) }) { return text }
-        return "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'"
+extension SessionHit {
+    var session: AgentLauncher.Session {
+        AgentLauncher.Session(agent: agent, id: sessionID, cwd: cwd, configDir: configDir)
     }
 }

@@ -96,6 +96,7 @@ struct SessionResultsView: View {
                                 search: search)
                                 .id(hit.id)
                                 .onTapGesture { search.activate(hit) }
+                                .contextMenu { SessionResultMenu(hit: hit, search: search) }
                         }
                     }
                     .padding(.horizontal, 6)
@@ -107,6 +108,32 @@ struct SessionResultsView: View {
                 }
             }
         }
+    }
+}
+
+/// Right-click menu of a search result.
+private struct SessionResultMenu: View {
+    let hit: SessionHit
+    let search: SessionSearch
+
+    var body: some View {
+        if search.liveAgent(for: hit) != nil {
+            Button("Switch to Session") { search.resume(hit) }
+            Divider()
+        } else {
+            Button("Resume in New Tab") { open(.resume, .newTab) }
+            Button("Resume in Split") { open(.resume, .split) }
+            Divider()
+        }
+        Button("Fork in New Tab") { open(.fork, .newTab) }
+        Button("Fork in Split") { open(.fork, .split) }
+        SessionDetailsMenuItems(session: hit.session, transcriptPath: hit.path, directory: hit.cwd)
+    }
+
+    private func open(_ mode: AgentLauncher.Mode, _ placement: AgentLauncher.Placement) {
+        search.confirming = nil
+        AgentLauncher.open(hit.session, mode: mode, placement: placement)
+        search.query = ""
     }
 }
 

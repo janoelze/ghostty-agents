@@ -36,6 +36,8 @@ enum AgentStatusStore {
         var activity: String?
         /// The agent's working directory as it reports it.
         var cwd: String?
+        /// The session transcript, which also tells which Claude Code config dir it uses.
+        var transcriptPath: String?
         var updatedAt: Date
     }
 
@@ -78,6 +80,7 @@ enum AgentStatusStore {
             message: (latest.payload["message"] as? String).map(firstLine),
             activity: activity,
             cwd: events.last { $0.payload["cwd"] is String }?.payload["cwd"] as? String,
+            transcriptPath: events.last { $0.payload["transcript_path"] is String }?.payload["transcript_path"] as? String,
             updatedAt: latest.date)
     }
 

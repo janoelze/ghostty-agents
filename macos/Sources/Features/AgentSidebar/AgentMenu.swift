@@ -42,6 +42,21 @@ enum AgentMenu {
 
         menu.addItem(.separator())
 
+        let restore = NSMenuItem(title: "Resume Agents After Restart", action: #selector(Target.toggleRestore(_:)), keyEquivalent: "")
+        restore.target = target
+        restore.toolTip = "When Ghostty restarts, resume the agent sessions that were running"
+        menu.addItem(restore)
+
+        let notify = NSMenuItem(title: "Notify When Agents Need You", action: #selector(Target.toggleNotifications(_:)), keyEquivalent: "")
+        notify.target = target
+        menu.addItem(notify)
+
+        let badge = NSMenuItem(title: "Show Waiting Agents in Dock", action: #selector(Target.toggleBadge(_:)), keyEquivalent: "")
+        badge.target = target
+        menu.addItem(badge)
+
+        menu.addItem(.separator())
+
         let cats = NSMenuItem(title: "Cat Mode", action: #selector(Target.toggleCatMode(_:)), keyEquivalent: "")
         cats.target = target
         menu.addItem(cats)
@@ -119,6 +134,18 @@ enum AgentMenu {
             SessionSearch.shared.rebuildIndex()
         }
 
+        @objc func toggleRestore(_ sender: Any?) {
+            AgentRestore.shared.isEnabled.toggle()
+        }
+
+        @objc func toggleNotifications(_ sender: Any?) {
+            AgentNotifier.shared.notificationsEnabled.toggle()
+        }
+
+        @objc func toggleBadge(_ sender: Any?) {
+            AgentNotifier.shared.badgeEnabled.toggle()
+        }
+
         @objc func toggleCatMode(_ sender: Any?) {
             AgentMonitor.shared.toggleCatMode()
         }
@@ -132,6 +159,12 @@ enum AgentMenu {
                 menuItem.title = AgentMonitor.shared.isSidebarVisible ? "Hide Agent Sidebar" : "Show Agent Sidebar"
             } else if menuItem.action == #selector(toggleTabColors(_:)) {
                 menuItem.state = AgentMonitor.shared.tabColors.isEnabled ? .on : .off
+            } else if menuItem.action == #selector(toggleRestore(_:)) {
+                menuItem.state = AgentRestore.shared.isEnabled ? .on : .off
+            } else if menuItem.action == #selector(toggleNotifications(_:)) {
+                menuItem.state = AgentNotifier.shared.notificationsEnabled ? .on : .off
+            } else if menuItem.action == #selector(toggleBadge(_:)) {
+                menuItem.state = AgentNotifier.shared.badgeEnabled ? .on : .off
             } else if menuItem.action == #selector(toggleCatMode(_:)) {
                 menuItem.state = AgentMonitor.shared.catMode ? .on : .off
                 guard CatSprite.isAvailable else {

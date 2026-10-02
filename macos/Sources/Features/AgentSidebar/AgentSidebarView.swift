@@ -107,6 +107,7 @@ struct AgentSidebarView: View {
                             ForEach(collapsed ? [] : group.agents, id: \.agent.id) { entry in
                                 AgentRow(agent: entry.agent, position: entry.position, catMode: monitor.catMode)
                                     .onTapGesture { monitor.focus(entry.agent.id) }
+                                    .contextMenu { AgentContextMenu(agent: entry.agent) }
                                     .padding(.bottom, 2)
                             }
                         }
@@ -236,6 +237,46 @@ private struct AgentGroupHeader: View {
         }
         .font(.system(size: 10.5))
         .foregroundStyle(.tertiary)
+    }
+}
+
+/// Right-click menu of an agent row.
+private struct AgentContextMenu: View {
+    let agent: AgentMonitor.Agent
+
+    var body: some View {
+        Button("Show") { AgentMonitor.shared.focus(agent.id) }
+        if let session = agent.session {
+            Divider()
+            Button("Fork Session in New Tab") { AgentLauncher.open(session, mode: .fork, placement: .newTab) }
+            Button("Fork Session in Split") { AgentLauncher.open(session, mode: .fork, placement: .split) }
+        }
+        SessionDetailsMenuItems(
+            session: agent.session,
+            transcriptPath: agent.transcriptPath,
+            directory: agent.session?.cwd ?? agent.directory.map { ($0 as NSString).expandingTildeInPath })
+    }
+}
+
+/// Copy and reveal actions shared by agent rows and search results.
+struct SessionDetailsMenuItems: View {
+    let session: AgentLauncher.Session?
+    let transcriptPath: String?
+    let directory: String?
+
+    var body: some View {
+        if session != nil || transcriptPath != nil || directory != nil { Divider() }
+        if let session {
+            Button("Copy Session ID") { AgentLauncher.copy(session.id) }
+            Button("Copy Resume Command") { AgentLauncher.copy(AgentLauncher.command(for: session)) }
+        }
+        if let transcriptPath, FileManager.default.fileExists(atPath: transcriptPath) {
+            Button("Reveal Transcript in Finder") { AgentLauncher.reveal(transcriptPath) }
+        }
+        if let directory, FileManager.default.fileExists(atPath: directory) {
+            Button("Open Folder in Finder") { AgentLauncher.openInFinder(directory) }
+            Button("New Tab in Folder") { AgentLauncher.open(command: nil, in: directory) }
+        }
     }
 }
 

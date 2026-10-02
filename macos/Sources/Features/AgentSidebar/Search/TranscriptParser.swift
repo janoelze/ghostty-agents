@@ -2,7 +2,7 @@ import Foundation
 
 /// The searchable parts of one agent session, read from its transcript file.
 struct SessionDocument {
-    enum Agent: String {
+    enum Agent: String, Codable {
         case claude
         case codex
     }

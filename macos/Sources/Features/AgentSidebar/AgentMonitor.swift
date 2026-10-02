@@ -12,8 +12,11 @@ final class AgentMonitor: ObservableObject {
         /// The surface UUID. Also the AppleScript `id` of the terminal.
         let id: UUID
         let name: String
-        /// The agent's session id as reported by its hooks, used to match search results.
-        let sessionID: String?
+        /// The agent's session as reported by its hooks: used to match search results, fork
+        /// it, and resume it after a restart.
+        let session: AgentLauncher.Session?
+        let transcriptPath: String?
+        var sessionID: String? { session?.id }
         let title: String
         /// The agent's working directory, abbreviated with `~`.
         let directory: String?
@@ -139,6 +142,7 @@ final class AgentMonitor: ObservableObject {
     func start() {
         guard timer == nil else { return }
         AgentMenu.install()
+        AgentRestore.shared.start()
         refresh()
         watcher = AgentChangeWatcher { [weak self] in self?.refresh() }
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
@@ -164,6 +168,16 @@ final class AgentMonitor: ObservableObject {
         else { return }
         lastViewed[id] = Date()
         controller.focusSurface(surface)
+    }
+
+    /// The terminal with this id, in any window.
+    func surface(for id: UUID) -> Ghostty.SurfaceView? {
+        surfaces[id]?.value
+    }
+
+    /// The terminal that last had focus, for opening splits next to it.
+    var lastFocusedSurface: Ghostty.SurfaceView? {
+        lastFocusedID.flatMap(surface(for:))
     }
 
     /// Returns keyboard focus to the terminal that last had it (e.g. after leaving search).
@@ -235,6 +249,8 @@ final class AgentMonitor: ObservableObject {
 
         if found != agents { agents = found }
         AgentMenu.update(agents: agents)
+        AgentRestore.shared.update(agents: agents, monitor: self)
+        AgentNotifier.shared.update(agents: agents, monitor: self)
 
         // Clean up after agents that exited without a SessionEnd hook.
         if !alive.isEmpty { AgentStatusStore.prune(keeping: alive) }
@@ -283,7 +299,16 @@ final class AgentMonitor: ObservableObject {
         return Agent(
             id: surface.id,
             name: name,
-            sessionID: status?.sessionID,
+            session: status.flatMap { status in
+                status.sessionID.map { id in
+                    AgentLauncher.Session(
+                        agent: SessionDocument.Agent(rawValue: status.agent ?? "") ?? .claude,
+                        id: id,
+                        cwd: status.cwd ?? cwd,
+                        configDir: AgentLauncher.Session.configDir(ofTranscript: status.transcriptPath))
+                }
+            },
+            transcriptPath: status?.transcriptPath,
             title: Self.title(
                 surface.title,
                 sessionTitle: status?.sessionID.flatMap(sessionTitle),
