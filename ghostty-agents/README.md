@@ -46,6 +46,19 @@ If agents run through a sandbox wrapper that cleans the environment, let
 `GHOSTTY_AGENTS_SURFACE_ID` through, or the sidebar only shows "Running". For
 Agent Safehouse: `safehouse --env-pass=GHOSTTY_AGENTS_SURFACE_ID …`.
 
+## Installing
+
+```sh
+ghostty-agents/install.sh                     # pull, build, install as /Applications/Ghostty.app
+ghostty-agents/install.sh --from-ci           # install the latest CI build instead
+ghostty-agents/install.sh --restore-official  # put the official Ghostty back
+```
+
+Re-run it to update. It downloads the Zig version upstream needs, refuses builds that could
+auto-update to official Ghostty, signs with your code signing identity (set
+`GHOSTTY_AGENTS_SIGN_IDENTITY` if you have several) so macOS permissions stick, saves the
+official app once, and refreshes the Claude Code hooks.
+
 ## Building
 
 Needs Xcode 26 with the Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`) and
