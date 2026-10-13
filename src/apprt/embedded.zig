@@ -1215,6 +1215,12 @@ pub const Surface = struct {
         const scale = try self.getContentScale();
         return .{ .x = pos.x * scale.x, .y = pos.y * scale.y };
     }
+
+    pub fn renderDeviceOptions(self: *const Surface) !renderer.Device.Options {
+        // The Metal renderer currently does not have any options
+        _ = self;
+        return .{};
+    }
 };
 
 /// Inspector is the state required for the terminal inspector. A terminal
