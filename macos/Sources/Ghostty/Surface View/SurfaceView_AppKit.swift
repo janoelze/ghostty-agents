@@ -2311,7 +2311,9 @@ extension Ghostty.SurfaceView {
 
         if let content {
             DispatchQueue.main.async {
-                self.surfaceModel?.sendText(content)
+                // Dropped text is untrusted, so it goes through the same
+                // paste protection as a clipboard paste.
+                self.surfaceModel?.pasteText(content)
             }
             return true
         }
