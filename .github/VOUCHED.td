@@ -52,6 +52,7 @@ anhthang
 anmitalidev
 anthonyzhoon
 aprilnea
+aredmondd
 arneshbanerjee
 arvin7liu
 athaapa
@@ -151,6 +152,7 @@ gagbo
 ghokun
 gmile
 gordonbondon
+-gotar No HITL
 gotenksin
 gpanders
 guilhermetk
