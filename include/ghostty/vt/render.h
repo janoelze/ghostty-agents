@@ -202,6 +202,160 @@ extern "C" {
  * }
  * @endcode
  *
+ * ## Images
+ *
+ * Programs can show images in a terminal through image protocols, such
+ * as the Kitty graphics protocol. The render state gives you the images
+ * to draw as a list of image placements, which you read with a
+ * @ref GhosttyRenderStateImageIterator. Each placement is one rectangle
+ * of one image:
+ *
+ *   - **What** to draw: the image's protocol and ID, plus a source
+ *     rectangle that selects part of the image in image pixels.
+ *   - **Where** to draw it: the top-left cell, relative to the viewport,
+ *     plus a pixel offset within that cell.
+ *   - **How big** to draw it: a destination size in pixels. The image is
+ *     already scaled to fit its cells.
+ *   - **In what order** to draw it: a layer (below cell backgrounds,
+ *     below text, or above text) and a z-index within the layer.
+ *
+ * These values mean the same thing for every protocol, so one drawing
+ * routine handles all of them. The only part that depends on the
+ * protocol is getting the image's pixels. Use the placement's protocol
+ * to pick the right storage, and its image ID to look the image up. For
+ * @ref GHOSTTY_IMAGE_PROTOCOL_KITTY, that is
+ * ghostty_kitty_graphics_image().
+ *
+ * ### Which Images Are Included
+ *
+ * Currently the list holds the Kitty graphics images that a program shows
+ * with placeholder cells (see below).
+ *
+ * Kitty images placed at a fixed position on the screen are not included
+ * yet. Read those from the Kitty graphics placement iterator, as
+ * described in the @ref kitty_graphics documentation. To draw both kinds
+ * together, get each fixed placement's position and size with
+ * ghostty_kitty_graphics_placement_render_info(), and its z-index with
+ * ghostty_kitty_graphics_placement_get(). The z-index also decides its
+ * layer, as described in @ref GhosttyKittyPlacementLayer. Then sort all
+ * of your images by layer and z-index as usual.
+ *
+ * Later versions may add more protocols and more kinds of placements.
+ * Skip any placement whose protocol you don't support, so that your
+ * renderer keeps working when that happens.
+ *
+ * ### Kitty Graphics Placeholders
+ *
+ * The Kitty graphics protocol lets a program place an image *with text*.
+ * The program creates a virtual placement, which has no position of its
+ * own, and then prints placeholder characters (U+10EEEE) wherever the
+ * image should appear. Each placeholder cell says which image it shows
+ * and which piece of that image belongs in the cell. Programs such as
+ * tmux use this so that images scroll, move and disappear along with the
+ * text around them.
+ *
+ * Since the cells decide where these images go, the Kitty graphics
+ * storage alone can't tell you where to draw them. The render state
+ * works this out for you during each update. It finds the placeholder
+ * cells, groups neighboring cells that show the same image into runs,
+ * and calculates which part of the image each run shows. It only looks
+ * at rows that changed, so this costs very little on a typical frame.
+ *
+ * A virtual placement usually turns into several placements in the list,
+ * one for each row of placeholder cells. For example, an image shown in
+ * a block of 10 columns by 4 rows of placeholders gives 4 placements,
+ * each 10 cells wide and 1 cell tall, and each drawing a quarter of the
+ * image. Drawn together, they form the whole image.
+ *
+ * ### Example
+ *
+ * @code{.c}
+ * // Create the iterator once and reuse it for every frame.
+ * GhosttyRenderStateImageIterator images = NULL;
+ * ghostty_render_state_image_iterator_new(NULL, &images);
+ *
+ * // Each frame, after ghostty_render_state_update():
+ * ghostty_render_state_get(
+ *     state, GHOSTTY_RENDER_STATE_DATA_IMAGE_ITERATOR, &images);
+ *
+ * while (ghostty_render_state_image_iterator_next(images)) {
+ *   GhosttyImageProtocol protocol;
+ *   GhosttyRenderStateImageLayer layer;
+ *   uint32_t image_id, offset_x, offset_y, width, height;
+ *   uint32_t src_x, src_y, src_width, src_height;
+ *   uint64_t generation;
+ *   int32_t col, row, z;
+ *
+ *   GhosttyRenderStateImageData keys[] = {
+ *     GHOSTTY_RENDER_STATE_IMAGE_DATA_PROTOCOL,
+ *     GHOSTTY_RENDER_STATE_IMAGE_DATA_IMAGE_ID,
+ *     GHOSTTY_RENDER_STATE_IMAGE_DATA_IMAGE_GENERATION,
+ *     GHOSTTY_RENDER_STATE_IMAGE_DATA_LAYER,
+ *     GHOSTTY_RENDER_STATE_IMAGE_DATA_Z,
+ *     GHOSTTY_RENDER_STATE_IMAGE_DATA_VIEWPORT_COL,
+ *     GHOSTTY_RENDER_STATE_IMAGE_DATA_VIEWPORT_ROW,
+ *     GHOSTTY_RENDER_STATE_IMAGE_DATA_CELL_OFFSET_X,
+ *     GHOSTTY_RENDER_STATE_IMAGE_DATA_CELL_OFFSET_Y,
+ *     GHOSTTY_RENDER_STATE_IMAGE_DATA_PIXEL_WIDTH,
+ *     GHOSTTY_RENDER_STATE_IMAGE_DATA_PIXEL_HEIGHT,
+ *     GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_X,
+ *     GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_Y,
+ *     GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_WIDTH,
+ *     GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_HEIGHT,
+ *   };
+ *   void* values[] = {
+ *     &protocol, &image_id, &generation, &layer, &z, &col, &row,
+ *     &offset_x, &offset_y, &width, &height,
+ *     &src_x, &src_y, &src_width, &src_height,
+ *   };
+ *   ghostty_render_state_image_get_multi(images, 15, keys, values, NULL);
+ *
+ *   // Your renderer: find the texture for this image. Only read the
+ *   // pixels when you don't have a texture for this protocol, ID and
+ *   // generation yet.
+ *   Texture* texture = texture_cache_find(protocol, image_id, generation);
+ *   if (texture == NULL) {
+ *     switch (protocol) {
+ *     case GHOSTTY_IMAGE_PROTOCOL_KITTY:
+ *       // Look up image_id with ghostty_kitty_graphics_image(), read its
+ *       // pixels with ghostty_kitty_graphics_image_get(), and upload.
+ *       texture = upload_kitty_image(image_id, generation);
+ *       break;
+ *     default:
+ *       // A protocol this renderer doesn't support yet.
+ *       continue;
+ *     }
+ *   }
+ *
+ *   // The destination rectangle in pixels, relative to the top-left
+ *   // corner of the viewport.
+ *   int32_t x = col * cell_width + (int32_t)offset_x;
+ *   int32_t y = row * cell_height + (int32_t)offset_y;
+ *
+ *   // Queue the image. Sort the queue by layer and then z before
+ *   // drawing, since iteration order is not drawing order.
+ *   queue_image(texture, layer, z, x, y, width, height,
+ *               src_x, src_y, src_width, src_height);
+ * }
+ *
+ * // When you no longer need it:
+ * ghostty_render_state_image_iterator_free(images);
+ * @endcode
+ *
+ * ### Things to Keep in Mind
+ *
+ *   - **Image pixels are not copied.** The render state only knows where
+ *     to draw. Read pixels from the terminal while you still have access
+ *     to it, for example right after the update while you hold your
+ *     terminal lock. The image generation tells you when you need to
+ *     read them again, so most frames don't touch the terminal at all.
+ *   - **The terminal needs a cell size.** Image sizes depend on the size
+ *     of a cell in pixels, which you set with ghostty_terminal_resize().
+ *     Without it there is nothing to draw and the iterator is empty.
+ *   - **Results last until the next update.** Like rows, they belong to
+ *     the render state and can be read without access to the terminal.
+ *     Fill the iterator again after every update.
+ *
  * ## Examples
  *
  * ### Creating and updating render state
@@ -396,6 +550,11 @@ typedef enum GHOSTTY_ENUM_TYPED {
    *  The next update uses this request. Both sides are zero if it was
    *  never set. */
   GHOSTTY_RENDER_STATE_DATA_OVERSCAN_REQUEST = 21,
+
+  /** Populate an existing GhosttyRenderStateImageIterator with the image
+   *  placements found by the last update. See "Images" in the render
+   *  state overview. */
+  GHOSTTY_RENDER_STATE_DATA_IMAGE_ITERATOR = 22,
   GHOSTTY_RENDER_STATE_DATA_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 } GhosttyRenderStateData;
 
@@ -418,6 +577,184 @@ typedef enum GHOSTTY_ENUM_TYPED {
   GHOSTTY_RENDER_STATE_OPTION_OVERSCAN = 1,
   GHOSTTY_RENDER_STATE_OPTION_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 } GhosttyRenderStateOption;
+
+/**
+ * The image protocols that a terminal supports.
+ *
+ * The render state uses this to say which protocol each image placement
+ * came from (see GHOSTTY_RENDER_STATE_IMAGE_DATA_PROTOCOL). Use it to
+ * decide where to read the image's pixels. Unlike the other image types
+ * here, the name has no RenderState prefix, because the protocol isn't
+ * specific to the render state.
+ *
+ * New protocols may be added in later versions. Skip placements with a
+ * protocol you don't support.
+ *
+ * @ingroup render
+ */
+typedef enum GHOSTTY_ENUM_TYPED {
+  /** The Kitty graphics protocol. Read the image with
+   *  ghostty_kitty_graphics_image(). */
+  GHOSTTY_IMAGE_PROTOCOL_KITTY = 0,
+  GHOSTTY_IMAGE_PROTOCOL_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
+} GhosttyImageProtocol;
+
+/**
+ * Where an image is drawn relative to the terminal's text.
+ *
+ * Draw the layers in this order: every image below backgrounds, then
+ * cell backgrounds, then images below text, then text, then images above
+ * text. Within a layer, draw images in order of their z-index, lowest
+ * first.
+ *
+ * @ingroup render
+ */
+typedef enum GHOSTTY_ENUM_TYPED {
+  /** Below the cell background colors. */
+  GHOSTTY_RENDER_STATE_IMAGE_LAYER_BELOW_BACKGROUND = 0,
+
+  /** Above the cell background colors and below the text. */
+  GHOSTTY_RENDER_STATE_IMAGE_LAYER_BELOW_TEXT = 1,
+
+  /** Above the text. */
+  GHOSTTY_RENDER_STATE_IMAGE_LAYER_ABOVE_TEXT = 2,
+  GHOSTTY_RENDER_STATE_IMAGE_LAYER_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
+} GhosttyRenderStateImageLayer;
+
+/**
+ * The kinds of Kitty graphics placements in a render state's image list.
+ *
+ * Read with GHOSTTY_RENDER_STATE_IMAGE_DATA_KITTY_KIND. Most renderers
+ * can draw every kind the same way. The kind is useful when you need to
+ * tell them apart, for example for debugging.
+ *
+ * @ingroup render
+ */
+typedef enum GHOSTTY_ENUM_TYPED {
+  /** Part of a virtual placement: one run of neighboring placeholder
+   *  cells in a single row. It is always one row tall. */
+  GHOSTTY_RENDER_STATE_KITTY_PLACEMENT_KIND_VIRTUAL = 0,
+
+  /** A relative placement attached to a virtual placement. Kitty
+   *  graphics lets a program position one image relative to another.
+   *  When the image it is attached to is a virtual placement, its
+   *  position also depends on the placeholder cells.
+   *
+   *  The position is measured from the top-left corner of the virtual
+   *  placement's cells on screen: the leftmost column and the topmost
+   *  row that any of its cells use. This matches Kitty. If none of those
+   *  cells are in the viewport, the relative placement is not included. */
+  GHOSTTY_RENDER_STATE_KITTY_PLACEMENT_KIND_RELATIVE = 1,
+  GHOSTTY_RENDER_STATE_KITTY_PLACEMENT_KIND_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
+} GhosttyRenderStateKittyPlacementKind;
+
+/**
+ * Data you can read about the current placement of an image iterator
+ * with ghostty_render_state_image_get().
+ *
+ * The type in parentheses is the type that the `out` pointer must point
+ * to. All pixel values use the cell size set with ghostty_terminal_resize().
+ *
+ * Some values only apply to one protocol, and have the protocol in their
+ * name. For example, GHOSTTY_RENDER_STATE_IMAGE_DATA_KITTY_KIND only
+ * applies to Kitty graphics placements. Reading one of these for a
+ * placement from another protocol returns GHOSTTY_NO_VALUE.
+ *
+ * @ingroup render
+ */
+typedef enum GHOSTTY_ENUM_TYPED {
+  /** Invalid value. Querying it returns GHOSTTY_INVALID_VALUE. */
+  GHOSTTY_RENDER_STATE_IMAGE_DATA_INVALID = 0,
+
+  /** The protocol the image came from (GhosttyImageProtocol). */
+  GHOSTTY_RENDER_STATE_IMAGE_DATA_PROTOCOL = 1,
+
+  /** The ID of the image to draw (uint32_t). IDs are only unique within
+   *  one protocol, so look the image up in the storage of its protocol.
+   *  For Kitty graphics, use ghostty_kitty_graphics_image(). */
+  GHOSTTY_RENDER_STATE_IMAGE_DATA_IMAGE_ID = 2,
+
+  /** The generation of the image's contents (uint64_t). It changes
+   *  whenever the image's pixels change, including when an animation
+   *  moves to a new frame. Use it as part of your texture cache key,
+   *  with the protocol and image ID: if it matches the texture you have,
+   *  you don't need to read the pixels again. For Kitty graphics, this
+   *  is the same value as GHOSTTY_KITTY_IMAGE_DATA_GENERATION. */
+  GHOSTTY_RENDER_STATE_IMAGE_DATA_IMAGE_GENERATION = 3,
+
+  /** The layer to draw the image in (GhosttyRenderStateImageLayer). */
+  GHOSTTY_RENDER_STATE_IMAGE_DATA_LAYER = 4,
+
+  /** The z-index (int32_t), which orders images within a layer. Images
+   *  with a lower z-index are drawn first. The value comes from the
+   *  image's protocol. For Kitty graphics, it is the z-index the program
+   *  asked for, and virtual placements are always -1. */
+  GHOSTTY_RENDER_STATE_IMAGE_DATA_Z = 5,
+
+  /** The column of the top-left cell (int32_t), where 0 is the leftmost
+   *  column of the viewport. A placement can start to the left of the
+   *  viewport, which gives a negative value. */
+  GHOSTTY_RENDER_STATE_IMAGE_DATA_VIEWPORT_COL = 6,
+
+  /** The row of the top-left cell (int32_t), where 0 is the top row of
+   *  the viewport. A placement in an overscan row above the viewport has
+   *  a negative row, the same as GHOSTTY_RENDER_STATE_ROW_DATA_VIEWPORT_Y.
+   *  A placement can also start above the viewport. */
+  GHOSTTY_RENDER_STATE_IMAGE_DATA_VIEWPORT_ROW = 7,
+
+  /** The number of columns of cells the placement covers (uint32_t). */
+  GHOSTTY_RENDER_STATE_IMAGE_DATA_GRID_COLS = 8,
+
+  /** The number of rows of cells the placement covers (uint32_t). */
+  GHOSTTY_RENDER_STATE_IMAGE_DATA_GRID_ROWS = 9,
+
+  /** How far the image starts from the left edge of the top-left cell,
+   *  in pixels (uint32_t). An image that is narrower than its cells is
+   *  centered, so this can be larger than a cell is wide. */
+  GHOSTTY_RENDER_STATE_IMAGE_DATA_CELL_OFFSET_X = 10,
+
+  /** How far the image starts from the top edge of the top-left cell,
+   *  in pixels (uint32_t). An image that is shorter than its cells is
+   *  centered, so this can be larger than a cell is tall. */
+  GHOSTTY_RENDER_STATE_IMAGE_DATA_CELL_OFFSET_Y = 11,
+
+  /** The width to draw the image at, in pixels (uint32_t). */
+  GHOSTTY_RENDER_STATE_IMAGE_DATA_PIXEL_WIDTH = 12,
+
+  /** The height to draw the image at, in pixels (uint32_t). */
+  GHOSTTY_RENDER_STATE_IMAGE_DATA_PIXEL_HEIGHT = 13,
+
+  /** The left edge of the part of the image to draw, in image pixels
+   *  (uint32_t). */
+  GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_X = 14,
+
+  /** The top edge of the part of the image to draw, in image pixels
+   *  (uint32_t). */
+  GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_Y = 15,
+
+  /** The width of the part of the image to draw, in image pixels
+   *  (uint32_t). Scale it to PIXEL_WIDTH when drawing. */
+  GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_WIDTH = 16,
+
+  /** The height of the part of the image to draw, in image pixels
+   *  (uint32_t). Scale it to PIXEL_HEIGHT when drawing. */
+  GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_HEIGHT = 17,
+
+  /** Kitty graphics only: the placement ID (uint32_t), or 0 if there
+   *  isn't one.
+   *
+   *  For a virtual placement, this is the placement ID that the
+   *  placeholder cells ask for. Cells that don't ask for one show the
+   *  image's virtual placement, whichever it is, and report 0. For a
+   *  relative placement, this is the ID the program gave it, or 0 if it
+   *  didn't give one. */
+  GHOSTTY_RENDER_STATE_IMAGE_DATA_KITTY_PLACEMENT_ID = 18,
+
+  /** Kitty graphics only: the kind of placement
+   *  (GhosttyRenderStateKittyPlacementKind). */
+  GHOSTTY_RENDER_STATE_IMAGE_DATA_KITTY_KIND = 19,
+  GHOSTTY_RENDER_STATE_IMAGE_DATA_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
+} GhosttyRenderStateImageData;
 
 /**
  * Queryable data kinds for ghostty_render_state_row_get().
@@ -1094,6 +1431,113 @@ GHOSTTY_API GhosttyResult ghostty_render_state_row_cells_get_multi(
  * @ingroup render
  */
 GHOSTTY_API void ghostty_render_state_row_cells_free(GhosttyRenderStateRowCells cells);
+
+/**
+ * Create a new image iterator.
+ *
+ * The iterator starts out empty. Fill it from a render state with
+ * ghostty_render_state_get() and GHOSTTY_RENDER_STATE_DATA_IMAGE_ITERATOR.
+ * You can keep one iterator for the lifetime of your renderer and fill it
+ * again after every update. See "Images" in the render state overview for
+ * a complete example.
+ *
+ * @param allocator Pointer to allocator, or NULL to use the default allocator
+ * @param[out] out_iterator On success, receives the created iterator handle
+ * @return GHOSTTY_SUCCESS on success, GHOSTTY_OUT_OF_MEMORY on allocation
+ *         failure
+ *
+ * @ingroup render
+ */
+GHOSTTY_API GhosttyResult ghostty_render_state_image_iterator_new(
+    const GhosttyAllocator* allocator,
+    GhosttyRenderStateImageIterator* out_iterator);
+
+/**
+ * Free an image iterator.
+ *
+ * @param iterator The iterator handle to free (may be NULL)
+ *
+ * @ingroup render
+ */
+GHOSTTY_API void ghostty_render_state_image_iterator_free(
+    GhosttyRenderStateImageIterator iterator);
+
+/**
+ * Move an image iterator to the next image placement.
+ *
+ * Call this before reading the first placement, and keep calling it
+ * until it returns false.
+ *
+ * The order of placements is not the order to draw them in. Sort them
+ * by layer (GHOSTTY_RENDER_STATE_IMAGE_DATA_LAYER) and then by z-index
+ * (GHOSTTY_RENDER_STATE_IMAGE_DATA_Z) first.
+ *
+ * Only placements with something to draw are returned. For example,
+ * placements of an image the terminal hasn't fully received yet are
+ * skipped.
+ *
+ * The iterator reads from the render state that filled it. After the
+ * next update of that render state, fill the iterator again before
+ * using it.
+ *
+ * @param iterator The iterator handle (NULL returns false)
+ * @return true if the iterator moved to a placement, false if there are
+ *         no more placements
+ *
+ * @ingroup render
+ */
+GHOSTTY_API bool ghostty_render_state_image_iterator_next(
+    GhosttyRenderStateImageIterator iterator);
+
+/**
+ * Read one value from the current placement of an image iterator.
+ *
+ * The `out` pointer must point to a value of the type listed for `data`
+ * in GhosttyRenderStateImageData. To read several values at once, use
+ * ghostty_render_state_image_get_multi().
+ *
+ * @param iterator The iterator handle, moved to a placement with
+ *        ghostty_render_state_image_iterator_next()
+ * @param data The value to read
+ * @param[out] out Pointer that receives the value
+ * @return GHOSTTY_SUCCESS on success. GHOSTTY_NO_VALUE if `data` only
+ *         applies to another protocol. GHOSTTY_INVALID_VALUE if the
+ *         iterator is NULL, is not on a placement, or `data` is not a
+ *         valid value.
+ *
+ * @ingroup render
+ */
+GHOSTTY_API GhosttyResult ghostty_render_state_image_get(
+    GhosttyRenderStateImageIterator iterator,
+    GhosttyRenderStateImageData data,
+    void* out);
+
+/**
+ * Read several values from the current placement of an image iterator in
+ * one call.
+ *
+ * This works like calling ghostty_render_state_image_get() once for each
+ * key. `values[i]` receives the value for `keys[i]`. The keys are read in
+ * order, and reading stops at the first error.
+ *
+ * @param iterator The iterator handle, moved to a placement with
+ *        ghostty_render_state_image_iterator_next()
+ * @param count The number of keys and values
+ * @param keys The values to read
+ * @param values Output pointers, one for each key
+ * @param[out] out_written If not NULL, receives the number of values
+ *             written before any error
+ * @return GHOSTTY_SUCCESS if every value was written, otherwise the
+ *         error from the first value that failed
+ *
+ * @ingroup render
+ */
+GHOSTTY_API GhosttyResult ghostty_render_state_image_get_multi(
+    GhosttyRenderStateImageIterator iterator,
+    size_t count,
+    const GhosttyRenderStateImageData* keys,
+    void** values,
+    size_t* out_written);
 
 /** @} */
 

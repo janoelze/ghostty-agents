@@ -106,6 +106,66 @@ extern "C" {
  * caches keyed on a generation value never alias across screens
  * (main/alternate), resets, or terminals.
  *
+ * ## Animation
+ *
+ * The Kitty graphics protocol lets programs send images with several
+ * frames and ask the terminal to play them, much like an animated GIF.
+ * The terminal stores every frame, but it does not keep its own timer.
+ * Your application drives playback by calling
+ * ghostty_kitty_graphics_animation_tick().
+ *
+ * Each call shows whichever frame is due at the time you pass in. When
+ * an image moves to a new frame, two things change:
+ *
+ * - @ref GHOSTTY_KITTY_IMAGE_DATA_DATA_PTR returns the pixels of the
+ *   new frame.
+ * - @ref GHOSTTY_KITTY_IMAGE_DATA_GENERATION returns a new value.
+ *
+ * If you already cache textures by image generation (see Change
+ * Detection above), new frames appear without any extra work.
+ *
+ * The tick also tells you when the next frame is due. Use that time to
+ * schedule a single redraw instead of calling the tick in a loop:
+ *
+ * 1. Call the tick each time you prepare a frame to draw, as long as
+ *    the storage holds at least one image.
+ * 2. If it returns GHOSTTY_SUCCESS, schedule one redraw at the returned
+ *    time. Don't schedule it sooner than your shortest frame interval
+ *    (for example 8 ms for a 120 Hz display).
+ * 3. If it returns GHOSTTY_NO_VALUE, nothing is playing. Don't schedule
+ *    anything.
+ *
+ * You never need to watch for animations starting. A program starts or
+ * resumes playback by writing a command to the terminal, and that write
+ * already gives you a reason to redraw. The tick on that redraw picks
+ * up the animation. A terminal with no playing animations costs nothing
+ * extra.
+ *
+ * Here is a helper that follows these steps. A renderer calls it once
+ * per frame and uses the result to schedule the next redraw:
+ *
+ * @snippet c-vt-kitty-graphics/src/main.c kitty-graphics-animation-tick
+ *
+ * The example below plays a two-frame animation with that helper. It
+ * uses a pretend clock so that it runs instantly:
+ *
+ * @snippet c-vt-kitty-graphics/src/main.c kitty-graphics-animation-play
+ *
+ * ## Unicode Placeholders
+ *
+ * A program can also place an image with text instead of at a fixed
+ * position. It creates a virtual placement and prints placeholder
+ * characters (U+10EEEE) where the image should appear, and the image
+ * moves with those characters.
+ *
+ * The placement iterator above still lists virtual placements (see
+ * @ref GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_IS_VIRTUAL), but it can't
+ * tell you where to draw them, because that depends on the cells. To
+ * draw them, use the render state's image list. It finds the placeholder
+ * cells and gives you a position, size and source rectangle for each part
+ * of the image, with the protocol set to @ref GHOSTTY_IMAGE_PROTOCOL_KITTY.
+ * See "Images" in the @ref render documentation.
+ *
  * ## Lifetime and Thread Safety
  *
  * All handles borrowed from the terminal (GhosttyKittyGraphics,
@@ -192,6 +252,11 @@ typedef enum GHOSTTY_ENUM_TYPED {
 
   /**
    * Whether this is a virtual placement (unicode placeholder).
+   *
+   * A virtual placement is drawn wherever placeholder cells for it
+   * appear, so it has no position here. Use the render state's image
+   * list to draw it. See "Unicode Placeholders" in the
+   * @ref kitty_graphics documentation.
    *
    * Output type: bool *
    */
@@ -507,6 +572,48 @@ GHOSTTY_API GhosttyResult ghostty_kitty_graphics_get(
     void* out);
 
 /**
+ * Advance playing animations and get the time of the next frame.
+ *
+ * Every playing animation moves to the frame that is due at `now_ms`.
+ * An animation moves forward at most one frame per call. If calls
+ * arrive late, playback slows down rather than skipping frames.
+ *
+ * Images that moved to a new frame get a new
+ * @ref GHOSTTY_KITTY_IMAGE_DATA_GENERATION, and their
+ * @ref GHOSTTY_KITTY_IMAGE_DATA_DATA_PTR returns the new frame's pixels.
+ *
+ * Time is measured in milliseconds on a clock you choose, such as the
+ * time since your application started. The clock must only move
+ * forward, and you must keep using the same clock with the same
+ * starting point for as long as the terminal exists. The time written
+ * to `next_ms` uses the same clock.
+ *
+ * This call changes the image storage. Like ghostty_terminal_vt_write(),
+ * it invalidates any @ref GhosttyKittyGraphicsImage handles and image
+ * data pointers you are holding, so look images up again afterwards.
+ * The @ref GhosttyKittyGraphics handle itself stays valid.
+ *
+ * Call this once each time you prepare a frame to draw, not in a loop.
+ * The "Animation" section of @ref kitty_graphics explains how to
+ * schedule redraws with the returned time and includes an example.
+ *
+ * @param graphics The kitty graphics handle
+ * @param now_ms The current time in milliseconds
+ * @param[out] next_ms Set to the time the next frame is due, in
+ *   milliseconds on the same clock as `now_ms`. Only written when the
+ *   function returns GHOSTTY_SUCCESS.
+ * @return GHOSTTY_SUCCESS if an animation is playing and `next_ms` was
+ *   set, GHOSTTY_NO_VALUE if nothing is playing or Kitty graphics are
+ *   disabled at build time, GHOSTTY_INVALID_VALUE if `next_ms` is NULL
+ *
+ * @ingroup kitty_graphics
+ */
+GHOSTTY_API GhosttyResult ghostty_kitty_graphics_animation_tick(
+    GhosttyKittyGraphics graphics,
+    uint64_t now_ms,
+    uint64_t* next_ms);
+
+/**
  * Look up a Kitty graphics image by its image ID.
  *
  * Returns NULL if no image with the given ID exists or if Kitty graphics
@@ -789,7 +896,9 @@ GHOSTTY_API GhosttyResult ghostty_kitty_graphics_placement_grid_size(
  * the placement is completely outside the viewport (its bottom edge
  * is above the viewport or its top edge is at or below the last
  * viewport row), or when the placement is a virtual (unicode
- * placeholder) placement.
+ * placeholder) placement. To draw virtual placements, and relative
+ * placements attached to them, see "Unicode Placeholders" in the
+ * @ref kitty_graphics documentation.
  *
  * @param iterator The placement iterator positioned on a placement
  * @param image The image handle for this placement's image
@@ -846,7 +955,9 @@ GHOSTTY_API GhosttyResult ghostty_kitty_graphics_placement_source_rect(
  *
  * When viewport_visible is false, the placement is fully off-screen
  * or is a virtual placement; viewport_col and viewport_row may
- * contain meaningless values in that case.
+ * contain meaningless values in that case. The render state gives the
+ * same information for virtual placements. See "Unicode Placeholders"
+ * in the @ref kitty_graphics documentation.
  *
  * @param iterator The iterator positioned on a placement
  * @param image The image handle for this placement's image

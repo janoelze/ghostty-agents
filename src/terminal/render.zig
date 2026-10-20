@@ -1,4 +1,5 @@
 const std = @import("std");
+const build_options = @import("terminal_options");
 const assert = @import("../quirks.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
@@ -16,6 +17,9 @@ const Screen = @import("Screen.zig");
 const ScreenSet = @import("ScreenSet.zig");
 const Style = @import("style.zig").Style;
 const Terminal = @import("Terminal.zig");
+const kitty_gfx = @import("kitty.zig").graphics;
+
+const log = std.log.scoped(.render_state);
 
 // Developer note: this is in src/terminal and not src/renderer because
 // the goal is that this remains generic to multiple renderers. This can
@@ -108,6 +112,56 @@ const Terminal = @import("Terminal.zig");
 /// With no overscan requested (the default), `row_data` holds exactly
 /// the viewport and indices are viewport y values, as before.
 ///
+/// ## Images
+///
+/// The render state also gives the images to draw, as a list of image
+/// placements (`ImagePlacement`). Each one is a rectangle of one image,
+/// with its position, size, source rectangle and draw order. These mean
+/// the same thing for every image protocol, so a renderer can draw them
+/// all the same way. Only reading the pixels depends on the protocol:
+///
+///     var it = state.imagePlacementIterator();
+///     while (it.next()) |p| {
+///         // `kittyTexture` and `queue` stand in for your renderer.
+///         // Find or upload a texture keyed by the protocol, image ID
+///         // and image generation. Only read pixels on a miss.
+///         const texture = switch (p.protocol) {
+///             .kitty => kittyTexture(p.image_id, p.image_generation),
+///         };
+///
+///         // Draw p.source_* of the texture at cell (p.x, p.y), offset
+///         // by (p.offset_x, p.offset_y) pixels, at a size of p.width by
+///         // p.height pixels, sorted by p.layer and then p.z.
+///         queue(texture, p);
+///     }
+///
+/// Currently the list holds the Kitty graphics images shown with
+/// placeholder cells (see below). Kitty images at a fixed position on
+/// screen are not included yet. Read those from the terminal's image
+/// storage.
+///
+/// ### Kitty Graphics Placeholders
+///
+/// The Kitty graphics protocol lets a program place an image with text.
+/// The program creates a virtual placement, which has no position of its
+/// own, and prints placeholder characters (U+10EEEE) where the image
+/// should appear. Each placeholder cell says which image it shows and
+/// which piece of the image belongs in that cell. The image then moves
+/// with the text.
+///
+/// Because the cells decide where these images go, the render state
+/// works out where to draw them during each update:
+///
+///   1. When a row is rebuilt, its placeholder cells are grouped into
+///      runs of neighboring cells that show the same image. These are
+///      stored in `Row.placeholders`.
+///   2. `beginUpdate` then looks up each new run's image and placement
+///      and calculates the part of the image it shows, and where. Runs
+///      on rows that didn't change keep their results, unless the
+///      images or the cell size changed.
+///   3. Relative placements attached to a virtual placement are
+///      positioned from that placement's runs.
+///
 /// ## Memory
 ///
 /// Note: the render state retains as much memory as possible between updates
@@ -197,6 +251,10 @@ pub const RenderState = struct {
     /// data so their style is undefined by contract anyway. See
     /// beginUpdate.
     pending_styles: std.ArrayList(StyleRun) = .empty,
+
+    /// Internal state for Kitty graphics placeholders. Read the results
+    /// with `imagePlacementIterator` instead.
+    kitty: Kitty.Data = .{},
 
     /// Initial state.
     pub const empty: RenderState = .{
@@ -326,6 +384,14 @@ pub const RenderState = struct {
         /// The highlights within this row.
         highlights: std.ArrayList(Highlight),
 
+        /// The runs of Kitty graphics placeholder cells in this row, from
+        /// left to right. Most callers want `imagePlacementIterator`,
+        /// which reads these for every row. This is always empty when
+        /// Kitty graphics are disabled.
+        ///
+        /// This uses the row arena, like highlights.
+        placeholders: std.ArrayList(Placeholder),
+
         /// The style runs applied to this row's per-cell style data
         /// by the last `endUpdate` that touched it. This is what lets
         /// `endUpdate` skip the (comparatively large) per-cell style
@@ -399,6 +465,179 @@ pub const RenderState = struct {
         range: [2]size.CellCountInt,
     };
 
+    /// A run of neighboring Kitty graphics placeholder cells in one row.
+    /// See `Row.placeholders`.
+    pub const Placeholder = Kitty.Placeholder;
+
+    /// The image protocols that a render state can find image placements
+    /// for. See `ImagePlacement.protocol`.
+    pub const ImageProtocol = lib.Enum(lib.target, &.{
+        // The Kitty graphics protocol.
+        "kitty",
+    });
+
+    /// Where an image is drawn relative to the text of the terminal.
+    ///
+    /// Draw in this order: images below backgrounds, then cell
+    /// backgrounds, then images below text, then text, then images above
+    /// text. Within a layer, draw images in order of their z-index,
+    /// lowest first.
+    pub const ImageLayer = lib.Enum(lib.target, &.{
+        // Below the cell background colors.
+        "below_background",
+
+        // Above the cell background colors and below the text.
+        "below_text",
+
+        // Above the text.
+        "above_text",
+    });
+
+    /// One rectangle of an image to draw. See `imagePlacementIterator`.
+    ///
+    /// To draw it, take the `source_*` rectangle of the image and draw
+    /// it `width` by `height` pixels in size, at this position:
+    ///
+    ///     px_x = x * cell_width + offset_x
+    ///     px_y = y * cell_height + offset_y
+    ///
+    /// where (px_x, px_y) is relative to the top-left of the viewport.
+    /// Get the image's pixels from the storage of its `protocol`, using
+    /// `image_id`.
+    pub const ImagePlacement = struct {
+        /// The protocol the image came from, and the information that
+        /// only applies to that protocol.
+        protocol: Protocol,
+
+        /// The ID of the image to draw. IDs are only unique within one
+        /// protocol, so always look the image up in the storage of
+        /// `protocol`.
+        image_id: u32,
+
+        /// The generation of the image's contents when the placement was
+        /// found. It changes whenever the image's pixels change, so it
+        /// works as a cache key for textures: if it matches the texture
+        /// you already have for this protocol and image ID, you don't
+        /// need to read the pixels again.
+        image_generation: u64,
+
+        /// The layer to draw the image in, and the z-index that orders
+        /// images within the layer. Lower z-indexes are drawn first.
+        layer: ImageLayer,
+        z: i32,
+
+        /// The top-left cell, where (0, 0) is the top-left cell of the
+        /// viewport. `y` is negative for overscan rows above the
+        /// viewport, like `viewportY`. Some placements can also start
+        /// above or to the left of the viewport.
+        x: i32,
+        y: i32,
+
+        /// The number of columns and rows of cells covered, starting at
+        /// `x` and `y`.
+        cols: u32,
+        rows: u32,
+
+        /// Where the image starts within the top-left cell, in pixels.
+        /// An image that doesn't fill its cells is centered, so these
+        /// can be larger than one cell.
+        offset_x: u32,
+        offset_y: u32,
+
+        /// The size to draw the image at, in pixels.
+        width: u32,
+        height: u32,
+
+        /// The part of the image to draw, in image pixels.
+        source_x: u32,
+        source_y: u32,
+        source_width: u32,
+        source_height: u32,
+
+        pub const Protocol = union(ImageProtocol) {
+            kitty: KittyPlacement,
+        };
+    };
+
+    /// Information that only applies to Kitty graphics placements. See
+    /// `ImagePlacement.protocol`.
+    pub const KittyPlacement = Kitty.Placement;
+
+    /// Iterates over the image placements found by the last update. Get
+    /// one with `imagePlacementIterator`.
+    ///
+    /// The order is not the order to draw in. Sort by layer and then
+    /// z-index before drawing. Only placements with something to draw
+    /// are returned.
+    pub const ImagePlacementIterator = struct {
+        rows: []const std.ArrayList(Placeholder),
+        viewport_y_base: isize,
+        relative: []const ImagePlacement,
+        y: usize = 0,
+        i: usize = 0,
+
+        pub fn next(self: *ImagePlacementIterator) ?ImagePlacement {
+            while (self.y < self.rows.len) {
+                const runs = self.rows[self.y].items;
+                while (self.i < runs.len) {
+                    const run = &runs[self.i];
+                    self.i += 1;
+                    if (run.state != .visible) continue;
+                    const g = run.geometry;
+                    return .{
+                        .protocol = .{ .kitty = .{
+                            .kind = .virtual,
+                            .placement_id = run.placement_id,
+                        } },
+                        .image_id = run.image_id,
+                        .image_generation = g.image_generation,
+                        .layer = .below_text,
+                        .z = -1,
+                        .x = run.x,
+                        .y = @intCast(self.viewport_y_base + @as(isize, @intCast(self.y))),
+                        .cols = run.width,
+                        .rows = 1,
+                        .offset_x = g.offset_x,
+                        .offset_y = g.offset_y,
+                        .width = g.width,
+                        .height = g.height,
+                        .source_x = g.source_x,
+                        .source_y = g.source_y,
+                        .source_width = g.source_width,
+                        .source_height = g.source_height,
+                    };
+                }
+                self.y += 1;
+                self.i = 0;
+            }
+
+            const idx = self.i;
+            if (idx >= self.relative.len) return null;
+            self.i += 1;
+            return self.relative[idx];
+        }
+    };
+
+    /// Returns an iterator over the image placements that the last update
+    /// found. This covers every captured row, including overscan rows.
+    ///
+    /// Currently these are the Kitty graphics placements shown through
+    /// placeholder cells (see "Kitty Graphics Placeholders" in the
+    /// `RenderState` docs). Images at a fixed position on screen are not
+    /// included yet. Read those from the terminal's image storage.
+    ///
+    /// This only reads memory owned by the render state, so it doesn't
+    /// need access to the terminal. The next update invalidates the
+    /// iterator.
+    pub fn imagePlacementIterator(self: *const RenderState) ImagePlacementIterator {
+        const range = self.rowDataRange();
+        return .{
+            .rows = self.row_data.items(.placeholders)[range.start..range.end],
+            .viewport_y_base = self.viewportY(range.start),
+            .relative = self.kitty.relative.items,
+        };
+    }
+
     pub const Cell = struct {
         /// Always set, this is the raw copied cell data from page.Cell.
         /// The managed memory (hyperlinks, graphames, etc.) is NOT safe
@@ -466,6 +705,7 @@ pub const RenderState = struct {
         }
         self.row_data.deinit(alloc);
         self.pending_styles.deinit(alloc);
+        self.kitty.deinit(alloc);
     }
 
     /// Update the render state to the latest terminal state.
@@ -664,6 +904,7 @@ pub const RenderState = struct {
                         .dirty = true,
                         .selection = null,
                         .highlights = .empty,
+                        .placeholders = .empty,
                         .applied_styles = .empty,
                     });
                 }
@@ -692,6 +933,7 @@ pub const RenderState = struct {
         const row_cells = row_data.items(.cells);
         const row_sels = row_data.items(.selection);
         const row_highlights = row_data.items(.highlights);
+        const row_placeholders = row_data.items(.placeholders);
         const row_dirties = row_data.items(.dirty);
         const row_applied = row_data.items(.applied_styles);
 
@@ -714,6 +956,8 @@ pub const RenderState = struct {
             .cells = row_cells,
             .sels = row_sels,
             .highlights = row_highlights,
+            .placeholders = row_placeholders,
+            .kitty_stale = &self.kitty.stale,
             .dirties = row_dirties,
             .pending_styles = &self.pending_styles,
             .applied_styles = row_applied,
@@ -846,6 +1090,17 @@ pub const RenderState = struct {
             .above = @intCast(top.above),
             .below = @intCast(below),
         };
+
+        // Work out what the Kitty placeholder runs draw. This must come
+        // after setting the overscan above, because it reads the
+        // captured rows.
+        if (comptime build_options.kitty_graphics) try Kitty.update(
+            self,
+            alloc,
+            t,
+            redraw,
+            any_dirty,
+        );
 
         // If our screen has a selection, then mark the rows with the
         // selection. We do this outside of the loop above because its unlikely
@@ -1369,6 +1624,455 @@ pub const RenderState = struct {
     }
 };
 
+/// The Kitty graphics logic of the render state: finding the images that
+/// programs show with placeholder cells, and positioning the relative
+/// placements attached to them. See "Kitty Graphics Placeholders" in
+/// the `RenderState` docs.
+const Kitty = struct {
+    /// The Kitty image storage key of a placement, or void when Kitty
+    /// graphics are disabled.
+    const PlacementKey = if (build_options.kitty_graphics)
+        kitty_gfx.ImageStorage.PlacementKey
+    else
+        void;
+
+    /// Information that only applies to Kitty graphics placements.
+    /// Public as `RenderState.KittyPlacement`.
+    pub const Placement = struct {
+        kind: Kind,
+
+        /// The placement ID, or zero if there isn't one. For a
+        /// virtual run, this is the ID that the cells ask for. For a
+        /// relative placement, this is the ID the program gave it.
+        placement_id: u32,
+
+        pub const Kind = lib.Enum(lib.target, &.{
+            // Part of a virtual placement: one run of placeholder
+            // cells in a single row. Its `rows` is always 1 and its
+            // z-index is always -1.
+            "virtual",
+
+            // A relative placement attached to a virtual placement.
+            // It is positioned from the top-left corner of the
+            // virtual placement's cells in the viewport: the leftmost
+            // column and topmost row that any of its cells use. This
+            // matches Kitty.
+            "relative",
+        });
+    };
+
+    /// A run of neighboring Kitty graphics placeholder cells in one row
+    /// that show one piece of one image.
+    ///
+    /// The fields up to `col` come from the cells and are set when the
+    /// row is rebuilt. The rest are filled in by `beginUpdate`, which
+    /// looks up the image and works out what to draw. Public as
+    /// `RenderState.Placeholder`.
+    pub const Placeholder = struct {
+        /// The column of the first cell and the number of cells.
+        x: size.CellCountInt,
+        width: size.CellCountInt,
+
+        /// The image and placement that the cells ask for. The cells
+        /// encode these in their foreground and underline colors. A
+        /// placement ID of zero means the image's virtual placement,
+        /// whichever it is.
+        image_id: u32,
+        placement_id: u32,
+
+        /// The piece of the image that the first cell shows. The image
+        /// is divided into a grid of cells, and this is the row and
+        /// column in that grid. Each following cell in the run shows the
+        /// next column.
+        row: u32,
+        col: u32,
+
+        /// Whether `beginUpdate` has looked at this run yet, and if so,
+        /// whether it draws anything. `geometry` is only set when this
+        /// is `visible`.
+        state: State = .stale,
+
+        /// The virtual placement this run shows, or null if there is
+        /// none. Not set while `state` is `stale`.
+        target: ?PlacementKey = null,
+
+        /// What to draw. Only set when `state` is `visible`.
+        geometry: Geometry = undefined,
+
+        pub const State = enum(u8) {
+            /// The run is new and hasn't been looked at yet.
+            stale,
+
+            /// There is nothing to draw, for example because the image
+            /// doesn't exist or hasn't been fully received.
+            hidden,
+
+            /// The run draws part of an image, described by `geometry`.
+            visible,
+        };
+
+        /// What a visible run draws. The fields have the same meaning
+        /// as the fields of the same name in `RenderState.ImagePlacement`.
+        pub const Geometry = struct {
+            image_generation: u64,
+            offset_x: u32,
+            offset_y: u32,
+            width: u32,
+            height: u32,
+            source_x: u32,
+            source_y: u32,
+            source_width: u32,
+            source_height: u32,
+        };
+    };
+
+    /// The Kitty graphics state of a render state (`RenderState.kitty`).
+    const Data = struct {
+        /// The image storage generation and the terminal size in pixels
+        /// when the runs were last looked up. If any of these change,
+        /// every run is looked up again. The pixel size stands in for
+        /// the cell size. (A change in rows or columns forces a redraw,
+        /// which looks up every run anyway.)
+        generation: u64 = 0,
+        width_px: u32 = 0,
+        height_px: u32 = 0,
+
+        /// True if a row was rebuilt with placeholder runs since the
+        /// last lookup, so some runs are `stale`. Set by the row
+        /// builder so that updates without new runs can skip the lookup.
+        stale: bool = false,
+
+        /// The relative placements attached to virtual placements, with
+        /// everything except their position worked out. Rebuilt when
+        /// the image storage generation changes.
+        relative_roots: std.ArrayList(RelativeRoot) = .empty,
+
+        /// The relative placements positioned by the last update.
+        relative: std.ArrayList(RenderState.ImagePlacement) = .empty,
+
+        const RelativeRoot = struct {
+            /// The virtual placement at the start of the chain, and the
+            /// total offset in cells from it to this placement.
+            root: PlacementKey,
+            horizontal_offset: i32,
+            vertical_offset: i32,
+
+            /// The placement, with `x` and `y` not yet set.
+            placement: RenderState.ImagePlacement,
+        };
+
+        fn deinit(self: *Data, alloc: Allocator) void {
+            self.relative_roots.deinit(alloc);
+            self.relative.deinit(alloc);
+        }
+    };
+
+    /// Work out what each placeholder run in the captured rows draws, and
+    /// position the relative placements attached to virtual placements.
+    /// This is part of `beginUpdate` and needs access to the terminal.
+    fn update(
+        state: *RenderState,
+        alloc: Allocator,
+        t: *const Terminal,
+        redraw: bool,
+        any_dirty: bool,
+    ) Allocator.Error!void {
+        const storage = &t.screens.active.kitty_images;
+
+        // What a run draws depends only on the run itself, the image
+        // storage and the cell size. If the storage and cell size didn't
+        // change, only new runs (from rebuilt rows) need a lookup. After
+        // a redraw we look up every run, because the redraw may be a
+        // switch to the other screen, which has its own images.
+        //
+        // This runs on every update, so the common case (no placeholders
+        // and nothing changed) must stay a few comparisons.
+        const all = redraw or
+            state.kitty.generation != storage.generation or
+            state.kitty.width_px != t.width_px or
+            state.kitty.height_px != t.height_px;
+        if (!all and !state.kitty.stale) {
+            @branchHint(.likely);
+
+            // No runs to look up. Relative placements only move when rows
+            // change, and there are none without roots.
+            if (!any_dirty or state.kitty.relative_roots.items.len == 0) return;
+        }
+
+        try @call(
+            .never_inline,
+            updateSlow,
+            .{ state, alloc, t, all },
+        );
+    }
+
+    /// The part of `update` that does the work. It is kept out of line
+    /// so that the common case in `update` stays small.
+    fn updateSlow(
+        state: *RenderState,
+        alloc: Allocator,
+        t: *const Terminal,
+        all: bool,
+    ) Allocator.Error!void {
+        const storage = &t.screens.active.kitty_images;
+        if (all) {
+            state.kitty.generation = storage.generation;
+            state.kitty.width_px = t.width_px;
+            state.kitty.height_px = t.height_px;
+            try relativeRoots(state, alloc, t);
+        }
+
+        const row_data = state.row_data.slice();
+        const row_placeholders = row_data.items(.placeholders);
+        if (all or state.kitty.stale) {
+            state.kitty.stale = false;
+            const cell_width: u32 = t.width_px / t.cols;
+            const cell_height: u32 = t.height_px / t.rows;
+            const row_pins = row_data.items(.pin);
+            const range = state.rowDataRange();
+            for (
+                row_pins[range.start..range.end],
+                row_placeholders[range.start..range.end],
+            ) |pin, runs| {
+                for (runs.items) |*run| {
+                    if (!all and run.state != .stale) continue;
+                    resolvePlaceholder(
+                        storage,
+                        pin,
+                        run,
+                        cell_width,
+                        cell_height,
+                    );
+                }
+            }
+        }
+
+        // Position each relative placement from the top-left corner of
+        // its virtual placement's cells in the viewport, using the
+        // smallest column and the smallest row of those cells. If the
+        // viewport has none of those cells, the relative placement isn't
+        // drawn, which matches Kitty. There are rarely more than a few
+        // relative placements, so a simple scan of the runs for each one
+        // is fine.
+        state.kitty.relative.clearRetainingCapacity();
+        if (state.kitty.relative_roots.items.len == 0) return;
+        const vp_start = state.viewportStart();
+        const vp_placeholders = row_placeholders[vp_start..][0..state.rows];
+        for (state.kitty.relative_roots.items) |root| {
+            var origin: ?struct { x: i64, y: i64 } = null;
+            for (vp_placeholders, 0..) |runs, y| {
+                for (runs.items) |run| {
+                    const target = run.target orelse continue;
+                    if (!target.eql(root.root)) continue;
+                    if (origin) |*o| {
+                        o.x = @min(o.x, run.x);
+                        o.y = @min(o.y, @as(i64, @intCast(y)));
+                    } else origin = .{ .x = run.x, .y = @intCast(y) };
+                }
+            }
+            const o = origin orelse continue;
+
+            // The position relative to the viewport, which can be
+            // negative. Skip placements entirely outside the viewport.
+            const p = root.placement;
+            const x: i64 = o.x + root.horizontal_offset;
+            const y: i64 = o.y + root.vertical_offset;
+            if (y >= state.rows or y + p.rows - 1 < 0) continue;
+            if (x >= state.cols or x + p.cols - 1 < 0) continue;
+
+            var positioned = p;
+            positioned.x = std.math.cast(i32, x) orelse continue;
+            positioned.y = std.math.cast(i32, y) orelse continue;
+            try state.kitty.relative.append(alloc, positioned);
+        }
+    }
+
+    /// Rebuild `state.kitty.relative_roots` from the image storage.
+    /// Everything about a relative placement except its position depends
+    /// only on the storage and the cell size, so this only runs when one
+    /// of those changes.
+    fn relativeRoots(
+        state: *RenderState,
+        alloc: Allocator,
+        t: *const Terminal,
+    ) Allocator.Error!void {
+        const storage = &t.screens.active.kitty_images;
+        state.kitty.relative_roots.clearRetainingCapacity();
+        var it = storage.placements.iterator();
+        while (it.next()) |kv| {
+            const rel = switch (kv.value_ptr.location) {
+                .relative => |rel| rel,
+                .pin, .virtual => continue,
+            };
+
+            // Follow the chain of parents to the placement at its start.
+            // A broken chain is never drawn. Chains that start at a fixed
+            // position are drawn from the image storage instead.
+            const chain = storage.resolveChain(rel) orelse continue;
+            if (chain.root.location != .virtual) continue;
+
+            const image = storage.imageById(kv.key_ptr.image_id) orelse continue;
+            if (image.data.isPending()) continue;
+
+            // The size is zero when the terminal has no cell size in
+            // pixels. Then there is nothing to draw.
+            const p = kv.value_ptr;
+            const grid = p.gridSize(image, t);
+            if (grid.cols == 0 or grid.rows == 0) continue;
+            const dest = p.pixelSize(image, t);
+            if (dest.width == 0 or dest.height == 0) continue;
+            const offset = p.cellOffset(t);
+            const source = p.sourceRect(image);
+
+            try state.kitty.relative_roots.append(alloc, .{
+                .root = chain.root_key,
+                .horizontal_offset = chain.horizontal_offset,
+                .vertical_offset = chain.vertical_offset,
+                .placement = .{
+                    .protocol = .{ .kitty = .{
+                        .kind = .relative,
+                        .placement_id = switch (kv.key_ptr.placement_id.tag) {
+                            .external => kv.key_ptr.placement_id.id,
+                            .internal => 0,
+                        },
+                    } },
+                    .image_id = kv.key_ptr.image_id,
+                    .image_generation = image.generation,
+                    // Kitty draws negative z-indexes below text. Below
+                    // minInt(i32) / 2 they are also below backgrounds.
+                    .layer = if (p.z < std.math.minInt(i32) / 2)
+                        .below_background
+                    else if (p.z < 0)
+                        .below_text
+                    else
+                        .above_text,
+                    .z = p.z,
+                    .x = 0,
+                    .y = 0,
+                    .cols = grid.cols,
+                    .rows = grid.rows,
+                    .offset_x = offset.x,
+                    .offset_y = offset.y,
+                    .width = dest.width,
+                    .height = dest.height,
+                    .source_x = source.x,
+                    .source_y = source.y,
+                    .source_width = source.width,
+                    .source_height = source.height,
+                },
+            });
+        }
+    }
+
+    /// Look up what one placeholder run draws and store it in the run.
+    /// `row_pin` is the pin of the run's row.
+    fn resolvePlaceholder(
+        storage: *const kitty_gfx.ImageStorage,
+        row_pin: PageList.Pin,
+        run: *Placeholder,
+        cell_width: u32,
+        cell_height: u32,
+    ) void {
+        run.state = .hidden;
+        run.target = null;
+
+        // Remember the virtual placement even if the image can't be
+        // drawn. Relative placements attached to it still need the
+        // position of these cells.
+        const target = storage.placeholderTarget(
+            run.image_id,
+            run.placement_id,
+        ) orelse return;
+        run.target = target.key;
+
+        const image = storage.imageById(run.image_id) orelse return;
+        if (image.data.isPending()) return;
+
+        // Without a cell size in pixels, there is no size to draw at.
+        if (cell_width == 0 or cell_height == 0) return;
+
+        var pin = row_pin;
+        pin.x = run.x;
+        const vp: kitty_gfx.unicode.Placement = .{
+            .pin = pin,
+            .image_id = run.image_id,
+            .placement_id = run.placement_id,
+            .col = run.col,
+            .row = run.row,
+            .width = run.width,
+            .height = 1,
+        };
+        const rp = vp.renderPlacement(
+            &target.placement,
+            &image,
+            cell_width,
+            cell_height,
+        ) catch |err| {
+            log.warn("error resolving virtual placement err={}", .{err});
+            return;
+        };
+        if (rp.dest_width == 0 or rp.dest_height == 0) return;
+
+        run.geometry = .{
+            .image_generation = image.generation,
+            .offset_x = rp.offset_x,
+            .offset_y = rp.offset_y,
+            .width = rp.dest_width,
+            .height = rp.dest_height,
+            .source_x = rp.source_x,
+            .source_y = rp.source_y,
+            .source_width = rp.source_width,
+            .source_height = rp.source_height,
+        };
+        run.state = .visible;
+    }
+
+    /// Groups Kitty placeholder cells into runs as the row scan visits
+    /// them. Feed it placeholder cells from left to right. A gap between
+    /// two cells (any cell that isn't fed) ends the current run.
+    const PlaceholderDecoder = struct {
+        list: *std.ArrayList(RenderState.Placeholder),
+        alloc: Allocator,
+        stale: *bool,
+        run: ?kitty_gfx.unicode.IncompletePlacement = null,
+        start: usize = 0,
+        end: usize = 0,
+
+        inline fn feed(
+            self: *PlaceholderDecoder,
+            x: usize,
+            style: *const Style,
+            cps: []const u21,
+        ) Allocator.Error!void {
+            const curr: kitty_gfx.unicode.IncompletePlacement = .init(style, cps);
+            if (self.run) |*prev| {
+                if (x == self.end and prev.append(&curr)) {
+                    self.end += 1;
+                    return;
+                }
+                try self.flush();
+            }
+            self.run = curr.start();
+            self.start = x;
+            self.end = x + 1;
+        }
+
+        fn flush(self: *PlaceholderDecoder) Allocator.Error!void {
+            const run = self.run orelse return;
+            self.run = null;
+            self.stale.* = true;
+            try self.list.append(self.alloc, .{
+                .x = @intCast(self.start),
+                .width = @intCast(run.width),
+                .image_id = run.imageId(),
+                .placement_id = run.placement_id orelse 0,
+                .row = run.row.?,
+                .col = run.col.?,
+            });
+        }
+    };
+};
+
 /// The number of rows/cells we scan as a single group when looking for
 /// dirty rows or special cells. Rows and cells are small packed structs
 /// so a group is scanned with a handful of vector operations.
@@ -1401,6 +2105,8 @@ const RowBuilder = struct {
     cells: []std.MultiArrayList(RenderState.Cell),
     sels: []?[2]size.CellCountInt,
     highlights: []std.ArrayList(RenderState.Highlight),
+    placeholders: []std.ArrayList(RenderState.Placeholder),
+    kitty_stale: *bool,
     dirties: []bool,
     pending_styles: *std.ArrayList(RenderState.StyleRun),
     applied_styles: []std.ArrayList(RenderState.StyleRun),
@@ -1423,6 +2129,7 @@ const RowBuilder = struct {
             _ = arena.reset(.retain_capacity);
             b.sels[vy] = null;
             b.highlights[vy] = .empty;
+            b.placeholders[vy] = .empty;
         }
         b.dirties[vy] = true;
 
@@ -1461,9 +2168,47 @@ const RowBuilder = struct {
             cells_slice.items(.raw),
             page_cells,
         );
-        if (!page_row.managedMemory()) return;
+        // Rows with Kitty placeholders are rare. They get their own copy
+        // of the scan below, so other rows pay nothing for them. These
+        // rows are scanned even without managed memory, because a
+        // placeholder cell can be a plain character with no style.
+        const placeholder_row = build_options.kitty_graphics and
+            page_row.kitty_virtual_placeholder;
+        if (!page_row.managedMemory() and !placeholder_row) return;
 
         const arena_alloc = arena.allocator();
+        if (placeholder_row) {
+            @branchHint(.unlikely);
+            var decoder: Kitty.PlaceholderDecoder = .{
+                .list = &b.placeholders[vy],
+                .alloc = arena_alloc,
+                .stale = b.kitty_stale,
+            };
+            try b.scan(true, p, page_cells, cells_slice, arena_alloc, vy, &decoder);
+            try decoder.flush();
+            return;
+        }
+
+        try b.scan(false, p, page_cells, cells_slice, arena_alloc, vy, {});
+    }
+
+    /// The managed memory scan of `row`. When `placeholders` is true,
+    /// this also feeds every Kitty placeholder cell to the decoder.
+    ///
+    /// This is deliberately not inline. Each value of `placeholders`
+    /// produces its own function, so the placeholder handling can't
+    /// change how the common version (without placeholders) is
+    /// optimized.
+    fn scan(
+        b: *const RowBuilder,
+        comptime placeholders: bool,
+        p: *page.Page,
+        page_cells: []const page.Cell,
+        cells_slice: std.MultiArrayList(RenderState.Cell).Slice,
+        arena_alloc: Allocator,
+        vy: usize,
+        decoder: if (placeholders) *Kitty.PlaceholderDecoder else void,
+    ) Allocator.Error!void {
         const cells_grapheme = cells_slice.items(.grapheme);
         const n = page_cells.len;
         const runs_start = b.pending_styles.items.len;
@@ -1473,16 +2218,22 @@ const RowBuilder = struct {
             // need managed handling are often rare even within rows that
             // have managed memory (e.g. a row is "styled" if a single
             // cell has a style) so groups are skipped with a few vector
-            // operations.
-            while (n - x >= CellSpecialMask.group_len) {
+            // operations. On placeholder rows a plain cell can be a
+            // placeholder, so those rows check each cell instead.
+            if (!placeholders) while (n - x >= CellSpecialMask.group_len) {
                 if (!CellSpecialMask.match(page_cells, x)) break;
                 x += CellSpecialMask.group_len;
-            }
+            };
 
             // Scalar scan to the next special cell.
             while (true) {
                 if (x >= n) break :scan;
                 if (!CellSpecialMask.matchScalar(page_cells[x])) break;
+                if (placeholders and
+                    page_cells[x].codepoint() == kitty_gfx.unicode.placeholder)
+                {
+                    try decoder.feed(x, &.{}, &.{});
+                }
                 x += 1;
             }
 
@@ -1531,6 +2282,15 @@ const RowBuilder = struct {
                         .end = @intCast(x),
                         .style = style_val,
                     });
+
+                    // A placeholder can leave out its row and column
+                    // (it then continues the run to its left), which
+                    // makes it a plain styled cell like these. Every
+                    // cell in this style run has the same style.
+                    if (placeholders) for (start..x) |px| {
+                        if (page_cells[px].codepoint() != kitty_gfx.unicode.placeholder) continue;
+                        try decoder.feed(px, &style_val, &.{});
+                    };
                 },
 
                 // If we have a multi-codepoint grapheme, look it up and
@@ -1539,21 +2299,34 @@ const RowBuilder = struct {
                 // than written directly) so that it is ordered correctly
                 // relative to possibly-stale runs from prior updates.
                 .codepoint_grapheme => {
-                    if (page_cell.style_id > 0) {
+                    const style_val: Style = if (page_cell.style_id > 0) style: {
+                        const style_val = p.styles.get(
+                            p.memory,
+                            page_cell.style_id,
+                        ).*;
                         try b.pending_styles.append(b.alloc, .{
                             .y = @intCast(vy),
                             .start = @intCast(x),
                             .end = @intCast(x + 1),
-                            .style = p.styles.get(
-                                p.memory,
-                                page_cell.style_id,
-                            ).*,
+                            .style = style_val,
                         });
-                    }
-                    cells_grapheme[x] = try arena_alloc.dupe(
+                        break :style style_val;
+                    } else .{};
+                    const cps = try arena_alloc.dupe(
                         u21,
                         p.lookupGrapheme(page_cell) orelse &.{},
                     );
+                    cells_grapheme[x] = cps;
+
+                    // Most placeholders give their row and column in
+                    // the image as combining characters, so most are
+                    // handled here, using the style and grapheme we
+                    // already have.
+                    if (placeholders and
+                        page_cell.codepoint() == kitty_gfx.unicode.placeholder)
+                    {
+                        try decoder.feed(x, &style_val, cps);
+                    }
                     x += 1;
                 },
 
@@ -1867,7 +2640,7 @@ fn testIncrementalMatchesFresh(request: RenderState.Overscan) !void {
                 },
 
                 // Cursor movement.
-                5 => s.nextSlice(try std.fmt.bufPrint(&buf, "\x1b[{};{}H", .{
+                5 => s.nextSlice(try std.mem.print(&buf, "\x1b[{};{}H", .{
                     rand.intRangeAtMost(u16, 1, 8),
                     rand.intRangeAtMost(u16, 1, 20),
                 })),
@@ -1890,18 +2663,18 @@ fn testIncrementalMatchesFresh(request: RenderState.Overscan) !void {
                 }),
 
                 // Insert/delete lines (row rotations within regions).
-                8 => s.nextSlice(try std.fmt.bufPrint(&buf, "\x1b[{}L", .{
+                8 => s.nextSlice(try std.mem.print(&buf, "\x1b[{}L", .{
                     rand.intRangeAtMost(u16, 1, 4),
                 })),
-                9 => s.nextSlice(try std.fmt.bufPrint(&buf, "\x1b[{}M", .{
+                9 => s.nextSlice(try std.mem.print(&buf, "\x1b[{}M", .{
                     rand.intRangeAtMost(u16, 1, 4),
                 })),
 
                 // Scroll up/down (page-dirty row rotations).
-                10 => s.nextSlice(try std.fmt.bufPrint(&buf, "\x1b[{}S", .{
+                10 => s.nextSlice(try std.mem.print(&buf, "\x1b[{}S", .{
                     rand.intRangeAtMost(u16, 1, 4),
                 })),
-                11 => s.nextSlice(try std.fmt.bufPrint(&buf, "\x1b[{}T", .{
+                11 => s.nextSlice(try std.mem.print(&buf, "\x1b[{}T", .{
                     rand.intRangeAtMost(u16, 1, 4),
                 })),
 
@@ -1909,7 +2682,7 @@ fn testIncrementalMatchesFresh(request: RenderState.Overscan) !void {
                 12 => {
                     const top = rand.intRangeAtMost(u16, 1, 4);
                     const bot = rand.intRangeAtMost(u16, top + 1, 8);
-                    s.nextSlice(try std.fmt.bufPrint(
+                    s.nextSlice(try std.mem.print(
                         &buf,
                         "\x1b[{};{}r",
                         .{ top, bot },
@@ -1917,10 +2690,10 @@ fn testIncrementalMatchesFresh(request: RenderState.Overscan) !void {
                 },
 
                 // Insert/delete/erase chars within a row.
-                13 => s.nextSlice(try std.fmt.bufPrint(&buf, "\x1b[{}@", .{
+                13 => s.nextSlice(try std.mem.print(&buf, "\x1b[{}@", .{
                     rand.intRangeAtMost(u16, 1, 5),
                 })),
-                14 => s.nextSlice(try std.fmt.bufPrint(&buf, "\x1b[{}P", .{
+                14 => s.nextSlice(try std.mem.print(&buf, "\x1b[{}P", .{
                     rand.intRangeAtMost(u16, 1, 5),
                 })),
 
@@ -2777,7 +3550,7 @@ fn testWriteNumberedLines(t: *Terminal, n: usize) !void {
     var s = t.vtStream();
     defer s.deinit();
     var buf: [32]u8 = undefined;
-    for (0..n) |i| s.nextSlice(try std.fmt.bufPrint(&buf, "{d}\r\n", .{i}));
+    for (0..n) |i| s.nextSlice(try std.mem.print(&buf, "{d}\r\n", .{i}));
 }
 
 /// Returns the number written on the row at `row_data` index `idx` by
@@ -3143,4 +3916,388 @@ test "overscan selection on overscan rows" {
         sels[vp + state.rows].?,
     );
     try testing.expect(sels[vp + state.rows - 2] == null);
+}
+
+test "placeholders: runs" {
+    if (comptime !build_options.kitty_graphics) return error.SkipZigTest;
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    const Run = struct {
+        y: usize = 0,
+        x: size.CellCountInt,
+        width: size.CellCountInt,
+        image_id: u32 = 0,
+        placement_id: u32 = 0,
+        row: u32 = 0,
+        col: u32 = 0,
+    };
+
+    // Each case writes `input` to a new terminal and expects exactly
+    // these placeholder runs, in order. No images exist, so none of them
+    // have anything to draw.
+    const cases: []const struct {
+        input: []const u8,
+        runs: []const Run,
+    } = &.{
+        // No placeholders.
+        .{ .input = "hello\r\nworld\r\n1\r\n2", .runs = &.{} },
+
+        // A single cell.
+        .{
+            .input = "\u{10EEEE}\u{0305}\u{0305}",
+            .runs = &.{.{ .x = 0, .width = 1 }},
+        },
+
+        // Two runs because the column jumps.
+        .{
+            .input = "\u{10EEEE}\u{0305}\u{0305}\u{10EEEE}\u{0305}\u{030E}",
+            .runs = &.{
+                .{ .x = 0, .width = 1 },
+                .{ .x = 1, .width = 1, .col = 2 },
+            },
+        },
+
+        // Explicit rows and columns that continue the run.
+        .{
+            .input = "\u{10EEEE}\u{0305}\u{0305}\u{10EEEE}\u{0305}\u{030D}" ++
+                "\u{10EEEE}\u{0305}\u{030E}",
+            .runs = &.{.{ .x = 0, .width = 3 }},
+        },
+
+        // Cells without a column continue the run.
+        .{
+            .input = "\u{10EEEE}\u{0305}\u{0305}\u{10EEEE}\u{0305}\u{10EEEE}\u{0305}",
+            .runs = &.{.{ .x = 0, .width = 3 }},
+        },
+
+        // Plain cells with no style or grapheme.
+        .{
+            .input = "\u{10EEEE}\u{10EEEE}\u{10EEEE}",
+            .runs = &.{.{ .x = 0, .width = 3 }},
+        },
+
+        // Styled plain cells, which are found through their style run.
+        .{
+            .input = "\x1b[38;5;42mA\u{10EEEE}\u{0305}\u{030D}\u{10EEEE}" ++
+                "\u{10EEEE}B\u{10EEEE}\u{10EEEE}",
+            .runs = &.{
+                .{ .x = 1, .width = 3, .image_id = 42, .col = 1 },
+                .{ .x = 5, .width = 2, .image_id = 42 },
+            },
+        },
+
+        // A run ends at a cell that isn't a placeholder.
+        .{
+            .input = "\u{10EEEE}\u{0305}\u{0305}\u{10EEEE}\u{0305}\u{030D}ABC",
+            .runs = &.{.{ .x = 0, .width = 2 }},
+        },
+
+        // A run starting in the middle of the row.
+        .{
+            .input = "ABC\u{10EEEE}\u{0305}\u{0305}\u{10EEEE}\u{0305}\u{030D}",
+            .runs = &.{.{ .x = 3, .width = 2 }},
+        },
+
+        // The image ID as a palette foreground color.
+        .{
+            .input = "\x1b[38;5;42m\u{10EEEE}\u{0305}\u{0305}",
+            .runs = &.{.{ .x = 0, .width = 1, .image_id = 42 }},
+        },
+
+        // The third diacritic sets the high 8 bits of the image ID. A
+        // cell without it continues the run, and a different one breaks
+        // it.
+        .{
+            .input = "\x1b[38;5;42m\u{10EEEE}\u{0305}\u{0305}\u{030E}" ++
+                "\u{10EEEE}\u{0305}\u{10EEEE}\u{0305}\u{030E}\u{0305}",
+            .runs = &.{
+                .{ .x = 0, .width = 2, .image_id = 42 | (2 << 24) },
+                .{ .x = 2, .width = 1, .image_id = 42, .col = 2 },
+            },
+        },
+
+        // The placement ID as the underline color. A different placement
+        // ID breaks the run.
+        .{
+            .input = "\x1b[38;5;42m\x1b[58;5;21m\u{10EEEE}\u{0305}\u{0305}" ++
+                "\u{10EEEE}\x1b[58;5;22m\u{10EEEE}",
+            .runs = &.{
+                .{ .x = 0, .width = 2, .image_id = 42, .placement_id = 21 },
+                .{ .x = 2, .width = 1, .image_id = 42, .placement_id = 22 },
+            },
+        },
+
+        // RGB colors for both IDs, across several rows.
+        .{
+            .input = "\x1b[38;2;1;2;3m\x1b[58;2;0;0;7m" ++
+                "\u{10EEEE}\u{0305}\u{0305}\u{10EEEE}\r\nx\r\n" ++
+                "\u{10EEEE}\u{030D}\u{0305}\u{10EEEE}\u{10EEEE}",
+            .runs = &.{
+                .{ .y = 0, .x = 0, .width = 2, .image_id = 0x010203, .placement_id = 7 },
+                .{ .y = 2, .x = 0, .width = 3, .image_id = 0x010203, .placement_id = 7, .row = 1 },
+            },
+        },
+    };
+
+    for (cases) |case| {
+        var t = try Terminal.init(io, alloc, .{ .rows = 5, .cols = 10 });
+        defer t.deinit(alloc);
+        t.modes.set(.grapheme_cluster, true);
+        var stream = t.vtStream();
+        defer stream.deinit();
+        stream.nextSlice(case.input);
+
+        var state: RenderState = .empty;
+        defer state.deinit(alloc);
+        try state.update(alloc, &t);
+
+        var actual: std.ArrayList(Run) = .empty;
+        defer actual.deinit(alloc);
+        for (state.row_data.items(.placeholders), 0..) |runs, y| {
+            for (runs.items) |run| try actual.append(alloc, .{
+                .y = y,
+                .x = run.x,
+                .width = run.width,
+                .image_id = run.image_id,
+                .placement_id = run.placement_id,
+                .row = run.row,
+                .col = run.col,
+            });
+        }
+        try testing.expectEqualSlices(Run, case.runs, actual.items);
+
+        var it = state.imagePlacementIterator();
+        try testing.expect(it.next() == null);
+    }
+}
+
+test "placeholders: resolved virtual placements" {
+    if (comptime !build_options.kitty_graphics) return error.SkipZigTest;
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var t = try Terminal.init(io, alloc, .{ .rows = 5, .cols = 10 });
+    defer t.deinit(alloc);
+    t.width_px = 100;
+    t.height_px = 50;
+    t.modes.set(.grapheme_cluster, true);
+
+    const storage = &t.screens.active.kitty_images;
+    const pixels = try alloc.alloc(u8, 10 * 10 * 3);
+    @memset(pixels, 0);
+    try storage.addImage(io, alloc, t.screens.active, .{
+        .id = 1,
+        .width = 10,
+        .height = 10,
+        .format = .rgb,
+        .data = .{ .complete = pixels },
+    });
+    try storage.addPlacement(io, alloc, t.screens.active, 1, 1, .{
+        .location = .{ .virtual = {} },
+        .columns = 2,
+        .rows = 2,
+    });
+    try t.setAttribute(.{ .@"256_fg" = 1 });
+    try t.setAttribute(.{ .@"256_underline_color" = 1 });
+    t.screens.active.cursorAbsolute(3, 1);
+    try t.printString("\u{10EEEE}\u{0305}\u{0305}\u{10EEEE}");
+    t.screens.active.cursorAbsolute(3, 2);
+    try t.printString("\u{10EEEE}\u{030D}\u{0305}\u{10EEEE}");
+
+    var state: RenderState = .empty;
+    defer state.deinit(alloc);
+    try state.update(alloc, &t);
+
+    // Each run draws half of the image, like the renderer would.
+    var it = state.imagePlacementIterator();
+    for (0..2) |y| {
+        const p = it.next().?;
+        try testing.expectEqual(RenderState.KittyPlacement.Kind.virtual, p.protocol.kitty.kind);
+        try testing.expectEqual(1, p.image_id);
+        try testing.expectEqual(1, p.protocol.kitty.placement_id);
+        try testing.expectEqual(3, p.x);
+        try testing.expectEqual(@as(i32, @intCast(y + 1)), p.y);
+        try testing.expectEqual(2, p.cols);
+        try testing.expectEqual(1, p.rows);
+        try testing.expectEqual(20, p.width);
+        try testing.expectEqual(10, p.height);
+        try testing.expectEqual(0, p.source_x);
+        try testing.expectEqual(@as(u32, @intCast(y * 5)), p.source_y);
+        try testing.expectEqual(10, p.source_width);
+        try testing.expectEqual(5, p.source_height);
+        try testing.expectEqual(-1, p.z);
+        try testing.expectEqual(RenderState.ImageLayer.below_text, p.layer);
+        try testing.expectEqual(RenderState.ImageProtocol.kitty, std.meta.activeTag(p.protocol));
+        try testing.expectEqual(
+            t.screens.active.kitty_images.imageById(1).?.generation,
+            p.image_generation,
+        );
+    }
+    try testing.expect(it.next() == null);
+}
+
+test "placeholders: only dirty rows are resolved again" {
+    if (comptime !build_options.kitty_graphics) return error.SkipZigTest;
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var t = try Terminal.init(io, alloc, .{ .rows = 5, .cols = 10 });
+    defer t.deinit(alloc);
+    t.width_px = 100;
+    t.height_px = 50;
+    t.modes.set(.grapheme_cluster, true);
+
+    const storage = &t.screens.active.kitty_images;
+    const pixels = try alloc.alloc(u8, 10 * 10 * 3);
+    @memset(pixels, 0);
+    try storage.addImage(io, alloc, t.screens.active, .{
+        .id = 1,
+        .width = 10,
+        .height = 10,
+        .format = .rgb,
+        .data = .{ .complete = pixels },
+    });
+    try storage.addPlacement(io, alloc, t.screens.active, 1, 1, .{
+        .location = .{ .virtual = {} },
+        .columns = 2,
+        .rows = 2,
+    });
+    try t.setAttribute(.{ .@"256_fg" = 1 });
+    try t.setAttribute(.{ .@"256_underline_color" = 1 });
+    try t.printString("\u{10EEEE}\u{0305}\u{0305}\u{10EEEE}\r\n");
+    try t.printString("\u{10EEEE}\u{030D}\u{0305}\u{10EEEE}");
+
+    var state: RenderState = .empty;
+    defer state.deinit(alloc);
+    try state.update(alloc, &t);
+
+    // Overwrite the geometry with a marker value, so we can tell when a
+    // run is looked up again.
+    const poison = 12345;
+    const rows = state.row_data.items(.placeholders);
+    for (rows[0..2]) |runs| {
+        try testing.expectEqual(1, runs.items.len);
+        try testing.expectEqual(RenderState.Placeholder.State.visible, runs.items[0].state);
+        runs.items[0].geometry.width = poison;
+    }
+
+    // An update with no changes looks up nothing.
+    try state.update(alloc, &t);
+    try testing.expectEqual(poison, rows[0].items[0].geometry.width);
+    try testing.expectEqual(poison, rows[1].items[0].geometry.width);
+
+    // Only the dirty row is rebuilt and looked up again.
+    t.screens.active.pages.pin(.{ .active = .{ .y = 1 } }).?.markDirty();
+    try state.update(alloc, &t);
+    try testing.expectEqual(poison, rows[0].items[0].geometry.width);
+    try testing.expectEqual(20, rows[1].items[0].geometry.width);
+
+    // A change to the image storage looks up every row again.
+    t.screens.active.kitty_images.markMutated(io);
+    try state.update(alloc, &t);
+    try testing.expectEqual(20, rows[0].items[0].geometry.width);
+
+    // So does a cell size change. With wider cells, the image is
+    // centered in the placement grid.
+    rows[0].items[0].geometry.width = poison;
+    t.width_px = 200;
+    try state.update(alloc, &t);
+    try testing.expectEqual(20, rows[0].items[0].geometry.width);
+    try testing.expectEqual(10, rows[0].items[0].geometry.offset_x);
+}
+
+test "placeholders: relative placement rooted at a virtual placement" {
+    if (comptime !build_options.kitty_graphics) return error.SkipZigTest;
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var t = try Terminal.init(io, alloc, .{ .rows = 5, .cols = 10 });
+    defer t.deinit(alloc);
+    t.width_px = 100;
+    t.height_px = 50;
+    t.modes.set(.grapheme_cluster, true);
+
+    const storage = &t.screens.active.kitty_images;
+    const pixels = try alloc.alloc(u8, 10 * 10 * 3);
+    @memset(pixels, 0);
+    try storage.addImage(io, alloc, t.screens.active, .{
+        .id = 1,
+        .width = 10,
+        .height = 10,
+        .format = .rgb,
+        .data = .{ .complete = pixels },
+    });
+    try storage.addPlacement(io, alloc, t.screens.active, 1, 1, .{
+        .location = .{ .virtual = {} },
+        .columns = 2,
+        .rows = 2,
+    });
+    try t.setAttribute(.{ .@"256_fg" = 1 });
+    try t.setAttribute(.{ .@"256_underline_color" = 1 });
+
+    // Placeholder cells at (3, 1) and (1, 2). Relative placements
+    // attached to the virtual placement are positioned from the smallest
+    // column and row, (1, 1), even though no cell is there.
+    t.screens.active.cursorAbsolute(3, 1);
+    try t.printString("\u{10EEEE}\u{0305}\u{0305}");
+    t.screens.active.cursorAbsolute(1, 2);
+    try t.printString("\u{10EEEE}\u{030D}\u{0305}");
+
+    try storage.addPlacement(io, alloc, t.screens.active, 1, 2, .{
+        .location = .{ .relative = .{
+            .parent = .{
+                .image_id = 1,
+                .placement_id = .{ .tag = .external, .id = 1 },
+            },
+            .horizontal_offset = 1,
+            .vertical_offset = 2,
+        } },
+        .columns = 1,
+        .rows = 1,
+        .z = 5,
+    });
+
+    var state: RenderState = .empty;
+    defer state.deinit(alloc);
+    try state.update(alloc, &t);
+
+    var it = state.imagePlacementIterator();
+    try testing.expectEqual(.virtual, it.next().?.protocol.kitty.kind);
+    try testing.expectEqual(.virtual, it.next().?.protocol.kitty.kind);
+    const child = it.next().?;
+    try testing.expectEqual(RenderState.KittyPlacement.Kind.relative, child.protocol.kitty.kind);
+    try testing.expectEqual(1, child.image_id);
+    try testing.expectEqual(2, child.protocol.kitty.placement_id);
+    try testing.expectEqual(RenderState.ImageLayer.above_text, child.layer);
+    try testing.expectEqual(2, child.x);
+    try testing.expectEqual(3, child.y);
+    try testing.expectEqual(1, child.cols);
+    try testing.expectEqual(1, child.rows);
+    try testing.expectEqual(10, child.width);
+    try testing.expectEqual(10, child.height);
+    try testing.expectEqual(5, child.z);
+    try testing.expect(it.next() == null);
+
+    // A new placeholder cell further left moves the child, even
+    // though the storage didn't change.
+    t.screens.active.cursorAbsolute(0, 3);
+    try t.printString("\u{10EEEE}\u{0305}\u{0305}");
+    try state.update(alloc, &t);
+    it = state.imagePlacementIterator();
+    for (0..3) |_| try testing.expectEqual(.virtual, it.next().?.protocol.kitty.kind);
+    const moved = it.next().?;
+    try testing.expectEqual(1, moved.x);
+    try testing.expectEqual(3, moved.y);
+    try testing.expect(it.next() == null);
+
+    // Without placeholder cells in the viewport the child isn't drawn.
+    t.eraseDisplay(.complete, false);
+    try state.update(alloc, &t);
+    it = state.imagePlacementIterator();
+    try testing.expect(it.next() == null);
 }

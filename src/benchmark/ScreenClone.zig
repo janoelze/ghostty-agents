@@ -32,6 +32,11 @@ pub const Options = struct {
     @"terminal-rows": u16 = 80,
     @"terminal-cols": u16 = 120,
 
+    /// The cell size in pixels. Kitty graphics images need a cell size
+    /// to be sized, so without one the Kitty modes have nothing to do.
+    @"cell-width": u32 = 10,
+    @"cell-height": u32 = 20,
+
     /// The data to read as a filepath. If this is "-" then
     /// we will read stdin. If this is unset, then we will
     /// do nothing (benchmark is a noop). It'd be more unixy to
@@ -69,6 +74,12 @@ pub const Mode = enum {
     /// common case of a shell prompt or TUI updating a small portion
     /// of the screen between frames.
     @"render-partial",
+
+    /// Like render-partial, and then reads every Kitty graphics image
+    /// placement found through placeholder cells, as a renderer does
+    /// each frame (see `RenderState.imagePlacementIterator`). Use it with
+    /// data that shows images with placeholder cells.
+    @"render-partial-kitty",
 
     /// RenderState update after scrolling the viewport by one row.
     /// This is the per-frame cost of user-driven scrolling through
@@ -145,6 +156,8 @@ pub fn create(
         .opts = opts,
         .terminal = try .init(global.io(), alloc, terminal_opts),
     };
+    ptr.terminal.width_px = @as(u32, opts.@"terminal-cols") * opts.@"cell-width";
+    ptr.terminal.height_px = @as(u32, opts.@"terminal-rows") * opts.@"cell-height";
 
     return ptr;
 }
@@ -165,6 +178,7 @@ pub fn benchmark(self: *ScreenClone) Benchmark {
             .@"render-clean-overscan",
             => stepRenderClean,
             .@"render-partial" => stepRenderPartial,
+            .@"render-partial-kitty" => stepRenderPartialKitty,
             .@"render-scroll",
             .@"render-scroll-overscan",
             => stepRenderScroll,
@@ -381,6 +395,34 @@ fn stepRenderPartial(ptr: *anyopaque) Benchmark.Error!void {
             return error.BenchmarkFailed;
         };
         std.mem.doNotOptimizeAway(&state);
+    }
+}
+
+fn stepRenderPartialKitty(ptr: *anyopaque) Benchmark.Error!void {
+    const self: *ScreenClone = @ptrCast(@alignCast(ptr));
+
+    const alloc = self.terminal.screens.active.alloc;
+    var state: terminalpkg.RenderState = .empty;
+    state.update(alloc, &self.terminal) catch |err| {
+        log.warn("error cloning screen err={}", .{err});
+        return error.BenchmarkFailed;
+    };
+
+    const pages = &self.terminal.screens.active.pages;
+    const pin = pages.pin(.{ .active = .{
+        .x = 0,
+        .y = self.terminal.rows / 2,
+    } }).?;
+
+    for (0..200_000 * @as(u64, self.opts.loops)) |_| {
+        pin.markDirty();
+        state.update(alloc, &self.terminal) catch |err| {
+            log.warn("error cloning screen err={}", .{err});
+            return error.BenchmarkFailed;
+        };
+
+        var it = state.imagePlacementIterator();
+        while (it.next()) |p| std.mem.doNotOptimizeAway(p);
     }
 }
 
