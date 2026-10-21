@@ -179,6 +179,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// cells for the draw call.
         cells_rebuilt: bool = false,
 
+        /// Set to true after the Kitty image placements are rebuilt. Like
+        /// `cells_rebuilt`, this means the next frame must be drawn. This
+        /// matters when the images change but no cell does, for example
+        /// when a program places an image.
+        images_rebuilt: bool = false,
+
         /// The current GPU uniform values.
         uniforms: shaderpkg.Uniforms,
 
@@ -1297,8 +1303,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             const should_run =
                 // Non-visible windows never vsync
                 self.visible and
-                // Only vsync if we have cell changes or animation
-                (self.cells_rebuilt or self.animationWake() != null);
+                // Only vsync if we have cell or image changes or animation
+                (self.cells_rebuilt or
+                    self.images_rebuilt or
+                    self.animationWake() != null);
 
             display_link.setRunning(should_run);
         }
@@ -1438,6 +1446,36 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     state.terminal.scrollViewport(.bottom);
                 }
 
+                // Advance any running Kitty graphics animations to the
+                // frame due now, and remember when the next frame is
+                // due (as an absolute deadline, see animationWake) so
+                // the renderer thread can schedule a wakeup for it.
+                //
+                // This runs before the render state update. Advancing
+                // a frame gives the image a new generation, so the
+                // update then reports placements with the new frame,
+                // and the frame is uploaded and drawn right away.
+                self.kitty_animation_next_ms = next: {
+                    // Likely case: we have no kitty images, so do nothing.
+                    const storage = &state.terminal.screens.active.kitty_images;
+                    if (storage.images.count() == 0) break :next null;
+
+                    const now: std.Io.Timestamp = .now(global.io(), .awake);
+                    const base = self.kitty_animation_clock orelse base: {
+                        self.kitty_animation_clock = now;
+                        break :base now;
+                    };
+                    const now_ms: u64 = @intCast(@divTrunc(
+                        base.durationTo(now).nanoseconds,
+                        std.time.ns_per_ms,
+                    ));
+                    const delay = storage.animationTick(
+                        global.io(),
+                        now_ms,
+                    ) orelse break :next null;
+                    break :next now_ms + delay;
+                };
+
                 // Begin the update of our terminal state. Work that
                 // doesn't require terminal access (e.g. style
                 // denormalization) is deferred to the endUpdate call
@@ -1467,41 +1505,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     break :preedit try p.clone(arena_alloc);
                 };
 
-                // Advance any running Kitty graphics animations to the
-                // frame due now, and remember when the next frame is
-                // due (as an absolute deadline, see animationWake) so
-                // the renderer thread can schedule a wakeup for it.
-                // This must happen before the dirty check below:
-                // advancing a frame marks the image state dirty.
-                self.kitty_animation_next_ms = next: {
-                    // Likely case: we have no kitty images, so do nothing.
-                    const storage = &state.terminal.screens.active.kitty_images;
-                    if (storage.images.count() == 0) break :next null;
-
-                    const now: std.Io.Timestamp = .now(global.io(), .awake);
-                    const base = self.kitty_animation_clock orelse base: {
-                        self.kitty_animation_clock = now;
-                        break :base now;
-                    };
-                    const now_ms: u64 = @intCast(@divTrunc(
-                        base.durationTo(now).nanoseconds,
-                        std.time.ns_per_ms,
-                    ));
-                    const delay = storage.animationTick(
-                        global.io(),
-                        now_ms,
-                    ) orelse break :next null;
-                    break :next now_ms + delay;
-                };
-
-                // Rebuild our Kitty image placements when the Kitty image
-                // state changed.
-                //
-                // Images shown with placeholder cells move when those
-                // cells change, so if there are any, we also rebuild when
-                // the cells changed. The render state update above has
-                // already found the placeholder cells, looking only at the
-                // rows that changed, so this rebuild is cheap.
+                // Rebuild our Kitty image placements when the placements
+                // or the images changed. The render state update above
+                // has already positioned every placement, so this is
+                // cheap. Most frames that only change text skip it.
                 if (self.images.kittyRequiresUpdate(
                     state.terminal,
                     &self.terminal_state,
@@ -1515,6 +1522,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                         state.terminal,
                         &self.terminal_state,
                     );
+                    self.images_rebuilt = true;
                 }
 
                 // Get our OSC8 links we're hovering if we have a mouse.
@@ -1787,6 +1795,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 size_changed or
                 swap_chain_rebuilt or
                 self.cells_rebuilt or
+                self.images_rebuilt or
                 self.animationWake() != null or
                 sync;
 
@@ -1797,6 +1806,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 return true;
             }
             self.cells_rebuilt = false;
+            self.images_rebuilt = false;
 
             // Wait for a frame to be available.
             const frame = swap_chain.nextFrame();

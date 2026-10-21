@@ -1104,6 +1104,10 @@ test "manifest uses public enum names" {
     const mode_values = manifest_types.get("GhosttyModeReportState").?.object.get("values").?.object;
     try std.testing.expectEqual(@as(i64, 0), mode_values.get("NOT_RECOGNIZED").?.integer);
     try std.testing.expectEqual(@as(i64, 4), mode_values.get("PERMANENTLY_RESET").?.integer);
+
+    const kitty_kind_values = manifest_types.get("GhosttyRenderStateKittyPlacementKind").?.object.get("values").?.object;
+    try std.testing.expectEqual(@as(i64, 1), kitty_kind_values.get("RELATIVE").?.integer);
+    try std.testing.expectEqual(@as(i64, 2), kitty_kind_values.get("FIXED").?.integer);
 }
 
 test "manifest named references resolve" {

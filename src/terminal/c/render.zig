@@ -216,6 +216,7 @@ pub const Data = enum(c_int) {
     overscan = 20,
     overscan_request = 21,
     image_iterator = 22,
+    image_placements_generation = 23,
 
     /// Output type expected for querying the data of the given kind.
     pub fn OutType(comptime self: Data) type {
@@ -235,6 +236,7 @@ pub const Data = enum(c_int) {
             .colors => Colors,
             .overscan, .overscan_request => Overscan,
             .image_iterator => ImageIterator,
+            .image_placements_generation => u64,
         };
     }
 };
@@ -461,6 +463,7 @@ fn getTyped(
                 .current = null,
             };
         },
+        .image_placements_generation => out.* = state.state.imagePlacementsGeneration(),
     }
 
     return .success;
@@ -1239,7 +1242,7 @@ pub fn image_iterator_new(
     };
     ptr.* = .{
         .alloc = alloc,
-        .inner = .{ .rows = &.{}, .viewport_y_base = 0, .relative = &.{} },
+        .inner = .{ .rows = &.{}, .viewport_y_base = 0, .placed = &.{} },
         .current = null,
     };
     result.* = ptr;
@@ -3411,4 +3414,280 @@ test "render: image iterator kitty virtual placement" {
 
     try testing.expect(!image_iterator_next(it));
     try testing.expectEqual(Result.invalid_value, image_get(it, .image_id, @ptrCast(&image_id)));
+}
+
+/// Test helper: a terminal with 10x10 pixel cells that holds a 1x1 RGB
+/// Kitty image with ID 1 and no placements.
+fn testKittyImageTerminal(
+    cols: size.CellCountInt,
+    rows: size.CellCountInt,
+) !terminal_c.Terminal {
+    var terminal: terminal_c.Terminal = null;
+    try testing.expectEqual(Result.success, terminal_c.new(
+        &lib.alloc.test_allocator,
+        &terminal,
+        cols,
+        rows,
+    ));
+    errdefer terminal_c.free(terminal);
+    try testing.expectEqual(Result.success, terminal_c.resize(terminal, cols, rows, 10, 10));
+    testVtWrite(terminal, "\x1b_Ga=t,t=d,f=24,i=1,s=1,v=1,q=2;AAAA\x1b\\");
+    return terminal;
+}
+
+/// Test helper: write VT data to a terminal.
+fn testVtWrite(terminal: terminal_c.Terminal, data: []const u8) void {
+    terminal_c.vt_write(terminal, data.ptr, data.len);
+}
+
+test "render: image iterator kitty fixed placement" {
+    if (comptime !@import("terminal_options").kitty_graphics) return error.SkipZigTest;
+
+    const terminal = try testKittyImageTerminal(10, 10);
+    defer terminal_c.free(terminal);
+
+    // Place image 1 at column 2, row 1 with the same values as the Zig
+    // test "fixed: pin placement in viewport".
+    testVtWrite(terminal, "\x1b[2;3H\x1b_Ga=p,i=1,p=7,c=3,r=2,X=4,Y=3,z=-5,C=1,q=2\x1b\\");
+
+    var state: RenderState = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &state,
+    ));
+    defer free(state);
+    try testing.expectEqual(Result.success, update(state, terminal));
+
+    var it: ImageIterator = null;
+    try testing.expectEqual(Result.success, image_iterator_new(
+        &lib.alloc.test_allocator,
+        &it,
+    ));
+    defer image_iterator_free(it);
+    try testing.expectEqual(Result.success, get(state, .image_iterator, @ptrCast(&it)));
+    try testing.expect(image_iterator_next(it));
+
+    var protocol: ImageProtocol = undefined;
+    var layer: ImageLayer = undefined;
+    var kind: KittyPlacementKind = .relative;
+    var image_id: u32 = 0;
+    var image_generation: u64 = 0;
+    var placement_id: u32 = 0;
+    var col: i32 = 0;
+    var row_: i32 = 0;
+    var cols: u32 = 0;
+    var rows: u32 = 0;
+    var offset_x: u32 = 0;
+    var offset_y: u32 = 0;
+    var width: u32 = 0;
+    var height: u32 = 0;
+    var source_x: u32 = 0;
+    var source_y: u32 = 0;
+    var source_width: u32 = 0;
+    var source_height: u32 = 0;
+    var z: i32 = 0;
+    var written: usize = 0;
+    const keys = [_]ImageData{
+        .protocol,
+        .layer,
+        .kitty_kind,
+        .image_id,
+        .image_generation,
+        .kitty_placement_id,
+        .viewport_col,
+        .viewport_row,
+        .grid_cols,
+        .grid_rows,
+        .cell_offset_x,
+        .cell_offset_y,
+        .pixel_width,
+        .pixel_height,
+        .source_x,
+        .source_y,
+        .source_width,
+        .source_height,
+        .z,
+    };
+    var values = [_]?*anyopaque{
+        @ptrCast(&protocol),
+        @ptrCast(&layer),
+        @ptrCast(&kind),
+        @ptrCast(&image_id),
+        @ptrCast(&image_generation),
+        @ptrCast(&placement_id),
+        @ptrCast(&col),
+        @ptrCast(&row_),
+        @ptrCast(&cols),
+        @ptrCast(&rows),
+        @ptrCast(&offset_x),
+        @ptrCast(&offset_y),
+        @ptrCast(&width),
+        @ptrCast(&height),
+        @ptrCast(&source_x),
+        @ptrCast(&source_y),
+        @ptrCast(&source_width),
+        @ptrCast(&source_height),
+        @ptrCast(&z),
+    };
+    try testing.expectEqual(Result.success, image_get_multi(
+        it,
+        keys.len,
+        &keys,
+        &values,
+        &written,
+    ));
+    try testing.expectEqual(keys.len, written);
+
+    const t = terminal.?.terminal;
+    const storage = &t.screens.active.kitty_images;
+    const image = storage.imageById(1).?;
+    const sp = storage.placements.get(.{
+        .image_id = 1,
+        .placement_id = .{ .tag = .external, .id = 7 },
+    }).?;
+    const dest = sp.pixelSize(image, t);
+    const source = sp.sourceRect(image);
+    try testing.expectEqual(ImageProtocol.kitty, protocol);
+    try testing.expectEqual(ImageLayer.below_text, layer);
+    try testing.expectEqual(KittyPlacementKind.fixed, kind);
+    try testing.expectEqual(1, image_id);
+    try testing.expectEqual(image.generation, image_generation);
+    try testing.expectEqual(7, placement_id);
+    try testing.expectEqual(2, col);
+    try testing.expectEqual(1, row_);
+    try testing.expectEqual(3, cols);
+    try testing.expectEqual(2, rows);
+    try testing.expectEqual(4, offset_x);
+    try testing.expectEqual(3, offset_y);
+    try testing.expectEqual(dest.width, width);
+    try testing.expectEqual(dest.height, height);
+    try testing.expectEqual(source.x, source_x);
+    try testing.expectEqual(source.y, source_y);
+    try testing.expectEqual(source.width, source_width);
+    try testing.expectEqual(source.height, source_height);
+    try testing.expectEqual(-5, z);
+    try testing.expect(!image_iterator_next(it));
+
+    // A placement the program gave no ID gets an internal one, which is
+    // reported as 0.
+    testVtWrite(terminal, "\x1b[6;1H\x1b_Ga=p,i=1,C=1,q=2\x1b\\");
+    try testing.expectEqual(Result.success, update(state, terminal));
+    try testing.expectEqual(Result.success, get(state, .image_iterator, @ptrCast(&it)));
+    var found_internal = false;
+    var count: usize = 0;
+    while (image_iterator_next(it)) : (count += 1) {
+        try testing.expectEqual(Result.success, image_get(it, .kitty_placement_id, @ptrCast(&placement_id)));
+        try testing.expectEqual(Result.success, image_get(it, .viewport_row, @ptrCast(&row_)));
+        if (row_ == 5) {
+            try testing.expectEqual(0, placement_id);
+            found_internal = true;
+        } else {
+            try testing.expectEqual(7, placement_id);
+        }
+    }
+    try testing.expectEqual(2, count);
+    try testing.expect(found_internal);
+}
+
+test "render: image iterator fixed placement above the viewport" {
+    if (comptime !@import("terminal_options").kitty_graphics) return error.SkipZigTest;
+
+    const terminal = try testKittyImageTerminal(10, 5);
+    defer terminal_c.free(terminal);
+
+    // A placement 2 columns by 3 rows on the top row, then two lines of
+    // output so that it starts 2 rows above the viewport.
+    testVtWrite(terminal, "\x1b[1;2H\x1b_Ga=p,i=1,p=1,c=2,r=3,C=1,q=2\x1b\\");
+    testVtWrite(terminal, "\x1b[5;1H\n\n");
+
+    var state: RenderState = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &state,
+    ));
+    defer free(state);
+    const req: Overscan = .{ .above = 1 };
+    try testing.expectEqual(Result.success, set(state, .overscan, @ptrCast(&req)));
+    try testing.expectEqual(Result.success, update(state, terminal));
+
+    var out: Overscan = .{};
+    try testing.expectEqual(Result.success, get(state, .overscan, @ptrCast(&out)));
+    try testing.expectEqual(1, out.above);
+
+    var it: ImageIterator = null;
+    try testing.expectEqual(Result.success, image_iterator_new(
+        &lib.alloc.test_allocator,
+        &it,
+    ));
+    defer image_iterator_free(it);
+    try testing.expectEqual(Result.success, get(state, .image_iterator, @ptrCast(&it)));
+    try testing.expect(image_iterator_next(it));
+
+    // Its top row is above the one overscan row, and it is still reported
+    // at its full size.
+    var col: i32 = 0;
+    var row_: i32 = 0;
+    var cols: u32 = 0;
+    var rows: u32 = 0;
+    var width: u32 = 0;
+    var height: u32 = 0;
+    try testing.expectEqual(Result.success, image_get(it, .viewport_col, @ptrCast(&col)));
+    try testing.expectEqual(Result.success, image_get(it, .viewport_row, @ptrCast(&row_)));
+    try testing.expectEqual(Result.success, image_get(it, .grid_cols, @ptrCast(&cols)));
+    try testing.expectEqual(Result.success, image_get(it, .grid_rows, @ptrCast(&rows)));
+    try testing.expectEqual(Result.success, image_get(it, .pixel_width, @ptrCast(&width)));
+    try testing.expectEqual(Result.success, image_get(it, .pixel_height, @ptrCast(&height)));
+    try testing.expectEqual(1, col);
+    try testing.expectEqual(-2, row_);
+    try testing.expectEqual(2, cols);
+    try testing.expectEqual(3, rows);
+    try testing.expectEqual(20, width);
+    try testing.expectEqual(30, height);
+    try testing.expect(!image_iterator_next(it));
+}
+
+test "render: image placements generation" {
+    const terminal = try testKittyImageTerminal(10, 5);
+    defer terminal_c.free(terminal);
+
+    var state: RenderState = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &state,
+    ));
+    defer free(state);
+    try testing.expectEqual(Result.success, update(state, terminal));
+
+    var generation: u64 = 0;
+    try testing.expectEqual(Result.success, get(state, .image_placements_generation, @ptrCast(&generation)));
+    if (comptime !@import("terminal_options").kitty_graphics) {
+        try testing.expectEqual(0, generation);
+        return;
+    }
+
+    var current: u64 = 0;
+
+    // A quiet update leaves it alone.
+    try testing.expectEqual(Result.success, update(state, terminal));
+    try testing.expectEqual(Result.success, get(state, .image_placements_generation, @ptrCast(&current)));
+    try testing.expectEqual(generation, current);
+
+    // Adding a placement changes it.
+    testVtWrite(terminal, "\x1b[1;1H\x1b_Ga=p,i=1,p=1,c=2,r=2,C=1,q=2\x1b\\");
+    try testing.expectEqual(Result.success, update(state, terminal));
+    try testing.expectEqual(Result.success, get(state, .image_placements_generation, @ptrCast(&current)));
+    try testing.expect(generation != current);
+    generation = current;
+
+    // Dirtying a row without images leaves it alone.
+    testVtWrite(terminal, "\x1b[4;1Hhello");
+    try testing.expectEqual(Result.success, update(state, terminal));
+    try testing.expectEqual(Result.success, get(state, .image_placements_generation, @ptrCast(&current)));
+    try testing.expectEqual(generation, current);
+
+    // Scrolling the screen moves the fixed placement, which changes it.
+    testVtWrite(terminal, "\x1b[5;1H\n");
+    try testing.expectEqual(Result.success, update(state, terminal));
+    try testing.expectEqual(Result.success, get(state, .image_placements_generation, @ptrCast(&current)));
+    try testing.expect(generation != current);
 }

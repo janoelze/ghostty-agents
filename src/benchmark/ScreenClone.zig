@@ -81,11 +81,26 @@ pub const Mode = enum {
     /// data that shows images with placeholder cells.
     @"render-partial-kitty",
 
+    /// Like render-partial-kitty, but the images are Kitty graphics
+    /// images placed at cells on the screen instead of placeholder
+    /// cells. `bench_fixed_count` of them are spread over the active
+    /// area. This models a program updating a small part of the screen
+    /// while images it placed earlier stay where they are.
+    @"render-partial-kitty-fixed",
+
     /// RenderState update after scrolling the viewport by one row.
     /// This is the per-frame cost of user-driven scrolling through
     /// scrollback (e.g. a trackpad fling), which today changes the
     /// viewport pin and forces a full rebuild.
     @"render-scroll",
+
+    /// Like render-scroll, and then reads every image placement, as
+    /// render-partial-kitty does. The screen holds as many images placed
+    /// at cells as render-partial-kitty-fixed, spread over the
+    /// scrollback that the viewport scrolls through. Some are usually
+    /// visible, and every one moves each frame. This models scrolling
+    /// back through output that contains images.
+    @"render-scroll-kitty-fixed",
 
     /// RenderState update after scrolling the viewport by half a
     /// screen. This models paging (page up/down, wheel ticks with
@@ -121,6 +136,12 @@ fn overscanRequest(mode: Mode) terminalpkg.RenderState.Overscan {
     };
 }
 
+/// The number of Kitty graphics images placed at cells in the
+/// `*-kitty-fixed` modes, and the size of each one in cells.
+const bench_fixed_count = 8;
+const bench_fixed_cols = 6;
+const bench_fixed_rows = 4;
+
 /// Number of scrollback lines written during setup so that the scroll
 /// modes have room to move in both directions.
 const scroll_setup_lines = 4000;
@@ -146,6 +167,7 @@ pub fn create(
     // pruned immediately.
     switch (opts.mode) {
         .@"render-scroll",
+        .@"render-scroll-kitty-fixed",
         .@"render-scroll-page",
         .@"render-scroll-overscan",
         => terminal_opts.max_scrollback_bytes = 256 * 1024 * 1024,
@@ -178,10 +200,13 @@ pub fn benchmark(self: *ScreenClone) Benchmark {
             .@"render-clean-overscan",
             => stepRenderClean,
             .@"render-partial" => stepRenderPartial,
-            .@"render-partial-kitty" => stepRenderPartialKitty,
+            .@"render-partial-kitty",
+            .@"render-partial-kitty-fixed",
+            => stepRenderPartialKitty,
             .@"render-scroll",
             .@"render-scroll-overscan",
             => stepRenderScroll,
+            .@"render-scroll-kitty-fixed" => stepRenderScrollKitty,
             .@"render-scroll-page" => stepRenderScrollPage,
             .@"render-output",
             .@"render-output-overscan",
@@ -207,6 +232,7 @@ fn setup(ptr: *anyopaque) Benchmark.Error!void {
     // viewport has somewhere to go.
     switch (self.opts.mode) {
         .@"render-scroll",
+        .@"render-scroll-kitty-fixed",
         .@"render-scroll-page",
         .@"render-scroll-overscan",
         => for (0..scroll_setup_lines) |_| s.nextSlice("hello\r\n"),
@@ -215,6 +241,25 @@ fn setup(ptr: *anyopaque) Benchmark.Error!void {
 
     for (0..self.terminal.rows - 1) |_| s.nextSlice("hello\r\n");
     s.nextSlice("hello");
+
+    // Kitty graphics images placed at cells, spread over the rows that
+    // the mode shows. That is the active area, or the scrollback that
+    // the scroll mode moves through.
+    switch (self.opts.mode) {
+        .@"render-partial-kitty-fixed" => self.addFixedPlacements(
+            self.terminal.rows,
+        ) catch |err| {
+            log.warn("error adding kitty placements err={}", .{err});
+            return error.BenchmarkFailed;
+        },
+        .@"render-scroll-kitty-fixed" => self.addFixedPlacements(
+            self.terminal.rows + scroll_reverse_interval,
+        ) catch |err| {
+            log.warn("error adding kitty placements err={}", .{err});
+            return error.BenchmarkFailed;
+        },
+        else => {},
+    }
 
     // Setup our terminal state
     const data_f: std.Io.File = (options.dataFile(
@@ -239,6 +284,41 @@ fn setup(ptr: *anyopaque) Benchmark.Error!void {
         };
         if (n == 0) break; // EOF reached
         stream.nextSlice(buf[0..n]);
+    }
+}
+
+/// Add one Kitty graphics image and place it at `bench_fixed_count`
+/// cells, spread evenly over the last `span` rows of the screen. The
+/// columns vary so that the images don't all line up.
+fn addFixedPlacements(self: *ScreenClone, span: usize) !void {
+    const screen = self.terminal.screens.active;
+    const alloc = screen.alloc;
+    const io = global.io();
+    const storage = &screen.kitty_images;
+
+    const width = 16;
+    const height = 16;
+    const pixels = try alloc.alloc(u8, width * height * 4);
+    @memset(pixels, 0x80);
+    try storage.addImage(io, alloc, screen, .{
+        .id = 1,
+        .width = width,
+        .height = height,
+        .format = .rgba,
+        .data = .{ .complete = pixels },
+    });
+
+    const bottom = screen.pages.getBottomRight(.screen).?;
+    const step = span / bench_fixed_count;
+    for (0..bench_fixed_count) |i| {
+        var p = bottom.up(span - 1 - i * step) orelse return error.OutOfRows;
+        p.x = @intCast((i * 13) % (self.terminal.cols - bench_fixed_cols));
+        const pin = try screen.pages.trackPin(p);
+        try storage.addPlacement(io, alloc, screen, 1, @intCast(i + 1), .{
+            .location = .{ .pin = pin },
+            .columns = bench_fixed_cols,
+            .rows = bench_fixed_rows,
+        });
     }
 }
 
@@ -429,6 +509,30 @@ fn stepRenderPartialKitty(ptr: *anyopaque) Benchmark.Error!void {
 fn stepRenderScroll(ptr: *anyopaque) Benchmark.Error!void {
     const self: *ScreenClone = @ptrCast(@alignCast(ptr));
     try renderScrollLoop(self, 1, scroll_reverse_interval);
+}
+
+fn stepRenderScrollKitty(ptr: *anyopaque) Benchmark.Error!void {
+    const self: *ScreenClone = @ptrCast(@alignCast(ptr));
+
+    const alloc = self.terminal.screens.active.alloc;
+    var state: terminalpkg.RenderState = .empty;
+    state.update(alloc, &self.terminal) catch |err| {
+        log.warn("error cloning screen err={}", .{err});
+        return error.BenchmarkFailed;
+    };
+
+    var dir: isize = 1;
+    for (0..50_000 * @as(u64, self.opts.loops)) |i| {
+        if (i % scroll_reverse_interval == 0) dir = -dir;
+        self.terminal.scrollViewport(.{ .delta = dir });
+        state.update(alloc, &self.terminal) catch |err| {
+            log.warn("error cloning screen err={}", .{err});
+            return error.BenchmarkFailed;
+        };
+
+        var it = state.imagePlacementIterator();
+        while (it.next()) |p| std.mem.doNotOptimizeAway(p);
+    }
 }
 
 fn stepRenderScrollPage(ptr: *anyopaque) Benchmark.Error!void {
