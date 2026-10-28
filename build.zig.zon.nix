@@ -186,10 +186,10 @@
       url = "https://deps.files.ghostty.org/wuffs-7411f488fe2e2c205c3d3b3d28638b7356522930.tar.gz";
       hash = "sha256-sOuwt3R6xG7oqXaA66QGUjFHrEjGnTXjwYs6rSRb+7I=";
     };
-    "z2d-0.13.0-j5P_HgsRFABzZDH54gI35P0OSrg7HFyJwS2bXX5uBdU4" = fetchzip {
+    "z2d-0.13.2-j5P_HkkVFAAtOSQPRTS7wbZLbYs7oETRn7nUKSUwDjM_" = fetchzip {
       name = "z2d";
-      url = "https://deps.files.ghostty.org/z2d-40af3e84a4e15a9f31d126b3f281f23ce6a3dae5.tar.gz";
-      hash = "sha256-3fpPl8dvDhqJMa4xreFSKHSqaXSNdP+22kQUQobTOEY=";
+      url = "https://github.com/vancluever/z2d/archive/8787d71bac42d9aab00428ccb37a4fd453418761.tar.gz";
+      hash = "sha256-EEs63f97CrNQy/p/1QOZ+F0Uus2++EtqODph1JiY2L4=";
     };
     "zf-0.11.0-OIRy8XCRAAB6FiMwIrtD6FqlagnFwpI6YyOu7bXeYH5J" = fetchzip {
       name = "zf";
