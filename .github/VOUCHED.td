@@ -191,6 +191,7 @@ jamylak
 jarred-sumner
 jcollie
 jesusvazquez
+jglanz
 jguthmiller
 jmcgover
 jmr
@@ -340,6 +341,7 @@ rmengelbrecht
 rmunn
 robmorgan
 rockorager
+romen
 ronijacobson
 rpfaeffle
 rtgibbons
