@@ -63,6 +63,8 @@ pub const Command = union(enum) {
             break :tag .{ .shell, trimmed };
         };
 
+        if (str.len == 0) return error.ValueRequired;
+
         switch (tag) {
             .shell => {
                 // We have a shell command, so we can just dupe it.
@@ -207,6 +209,8 @@ pub const Command = union(enum) {
         try testing.expectError(error.ValueRequired, v.parseCLI(alloc, null));
         try testing.expectError(error.ValueRequired, v.parseCLI(alloc, ""));
         try testing.expectError(error.ValueRequired, v.parseCLI(alloc, " "));
+        try testing.expectError(error.ValueRequired, v.parseCLI(alloc, "direct:"));
+        try testing.expectError(error.ValueRequired, v.parseCLI(alloc, "shell:"));
     }
 
     test "Command: parseCLI shell expanded" {
